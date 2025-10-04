@@ -4,15 +4,11 @@
 
 ![FactorHub Logo](https://img.shields.io/badge/FactorHub-量化因子分析平台-blue?style=for-the-badge)
 ![Python](https://img.shields.io/badge/Python-3.8%2B-green?style=for-the-badge)
-![Streamlit](https://img.shields.io/badge/Streamlit-1.50%2B-red?style=for-the-badge)
-![AKShare](https://img.shields.io/badge/AKShare-1.11%2B-orange?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
-
 [![Stars](https://img.shields.io/github/stars/cn-vhql/FactorHub?style=social)](https://github.com/cn-vhql/FactorHub)
 [![Forks](https://img.shields.io/github/forks/cn-vhql/FactorHub?style=social)](https://github.com/cn-vhql/FactorHub)
 [![Issues](https://img.shields.io/github/issues/cn-vhql/FactorHub)](https://github.com/cn-vhql/FactorHub/issues)
 ![Code Size](https://img.shields.io/github/languages/code-size/cn-vhql/FactorHub)
-![Python Lines](https://img.shields.io/tokei/lines/github/cn-vhql/FactorHub)
 
 </div>
 
