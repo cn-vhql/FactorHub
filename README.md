@@ -8,11 +8,11 @@
 ![AKShare](https://img.shields.io/badge/AKShare-1.11%2B-orange?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge)
 
-[![Stars](https://img.shields.io/github/stars/your-username/FactorHub?style=social)](https://github.com/your-username/FactorHub)
-[![Forks](https://img.shields.io/github/forks/your-username/FactorHub?style=social)](https://github.com/your-username/FactorHub)
-[![Issues](https://img.shields.io/github/issues/your-username/FactorHub)](https://github.com/your-username/FactorHub/issues)
-![Code Size](https://img.shields.io/github/languages/code-size/your-username/FactorHub)
-![Python Lines](https://img.shields.io/tokei/lines/github/your-username/FactorHub)
+[![Stars](https://img.shields.io/github/stars/cn-vhql/FactorHub?style=social)](https://github.com/cn-vhql/FactorHub)
+[![Forks](https://img.shields.io/github/forks/cn-vhql/FactorHub?style=social)](https://github.com/cn-vhql/FactorHub)
+[![Issues](https://img.shields.io/github/issues/cn-vhql/FactorHub)](https://github.com/cn-vhql/FactorHub/issues)
+![Code Size](https://img.shields.io/github/languages/code-size/cn-vhql/FactorHub)
+![Python Lines](https://img.shields.io/tokei/lines/github/cn-vhql/FactorHub)
 
 </div>
 
@@ -34,7 +34,7 @@ FactorHub是一个**自研的现代化量化因子分析平台**，专为量化�
 ## 🚀 核心功能
 
 ### 📊 数据管理模块
-- **智能数据获取**: 集成AKShare API，实时获取A股、港股、美股市场数据
+- **智能数据获取**: 集成AKShare API，免费获取A股市场数据
 - **自动化预处理**: 智能复权处理、缺失值填充、异常值检测与清洗
 - **高效缓存系统**: 本地文件缓存，支持增量更新和过期管理
 - **多源数据支持**: 支持本地文件、数据库、API接口等多种数据源
@@ -312,7 +312,7 @@ graph TD
 ### 📋 系统要求
 - **操作系统**: Windows 10+, macOS 10.14+, Ubuntu 18.04+
 - **Python版本**: Python 3.8或更高版本
-- **内存要求**: 至少8GB RAM（推荐16GB+）
+- **内存要求**: 至少4GB RAM（推荐8GB+）
 - **存储空间**: 至少10GB可用磁盘空间
 - **网络要求**: 稳定的互联网连接（用于数据获取）
 
@@ -321,7 +321,7 @@ graph TD
 #### 方式一：使用虚拟环境（推荐）
 ```bash
 # 1. 克隆项目
-git clone https://github.com/your-username/FactorHub.git
+git clone https://github.com/cn-vhql/FactorHub.git
 cd FactorHub
 
 # 2. 创建虚拟环境
@@ -1095,7 +1095,7 @@ def custom_analysis(self, factor_data, factor_name):
 
 ## 许可证
 
-本项目采用MIT许可证，详见LICENSE文件。
+本项目采用MIT许可证。
 
 ## 贡献指南
 
@@ -1103,9 +1103,9 @@ def custom_analysis(self, factor_data, factor_name):
 
 ## 联系方式
 
-- 项目主页: <repository-url>
-- 问题反馈: <issues-url>
-- 邮箱: <contact-email>
+- 项目主页: <https://github.com/cn-vhql/FactorHub>
+- 问题反馈: <https://github.com/cn-vhql/FactorHub/issues>
+- 邮箱: yl_zhangqiang@foxmail.com>
 
 ---
 
