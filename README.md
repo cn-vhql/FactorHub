@@ -18,6 +18,7 @@ FactorHub是一个**自研的现代化量化因子分析平台**，专为量化�
 
 **FactorHub** = **Factor**（因子） + **Hub**（中心），意为因子分析和管理的核心枢纽。
 
+
 ### 🎯 核心价值
 
 - **全流程覆盖**: 从原始数据到投资策略的一站式解决方案
@@ -66,10 +67,20 @@ FactorHub是一个**自研的现代化量化因子分析平台**，专为量化�
 - **实时监控**: 任务进度条、系统状态监控、错误提示
 - **多主题支持**: 明暗主题切换、个性化界面配置
 
+## 系统截图
+![alt text](docs/png/image.png)
+![alt text](docs/png/image-1.png)
+![alt text](docs/png/image-2.png)
+![alt text](docs/png/image-3.png)
+![alt text](docs/png/image-4.png)
+![alt text](docs/png/image-5.png)
+![alt text](docs/png/image-6.png)
+![alt text](docs/png/image-7.png)
+
 ## 🏗️ 技术架构
 
 ### 🔧 核心技术栈
-- **AKShare**: 国内领先的金融数据接口，覆盖A股、港股、美股市场
+- **AKShare**: 国内好用又免费的金融数据接口，覆盖A股、港股、美股市场
 - **Streamlit**: 快速构建数据应用的Web框架，提供现代化UI体验
 - **Plotly**: 交互式数据可视化库，支持复杂图表展示
 - **Pandas/Numpy**: 高性能数据处理和数值计算的核心引擎
