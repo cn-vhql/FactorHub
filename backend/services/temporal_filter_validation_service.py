@@ -36,7 +36,7 @@ class TemporalFilterValidationService:
     def load_fixed_pool(self, csv_path: str) -> list:
         """
         加载固定股票池 CSV（含 'code' 列）。
-        返回去重后的股票代码列表。
+        返回去重后的股票代码列表（6 位零填充，去除 .0 后缀）。
         """
         path = Path(csv_path)
         if not path.exists():
@@ -44,7 +44,24 @@ class TemporalFilterValidationService:
         df = pd.read_csv(path)
         if "code" not in df.columns:
             raise ValueError(f"CSV 缺少 'code' 列: {csv_path}")
-        return df["code"].dropna().astype(str).unique().tolist()
+
+        def _normalize_code(c) -> str:
+            s = str(c).strip()
+            # 去除 pandas float 读入产生的 .0 后缀
+            if s.endswith(".0"):
+                s = s[:-2]
+            # 纯数字补零到 6 位
+            if s.isdigit():
+                s = s.zfill(6)
+            return s
+
+        return (
+            df["code"]
+            .dropna()
+            .map(_normalize_code)
+            .drop_duplicates()
+            .tolist()
+        )
 
     def load_snapshot_pool(self, csv_path: str) -> pd.DataFrame:
         """
@@ -70,13 +87,16 @@ class TemporalFilterValidationService:
         codes: list,
         start_date: str,
         end_date: str,
+        max_workers: int = 4,
     ) -> pd.DataFrame:
         """
         构建历史评分面板。
         返回列：date, code, score, rank, trend_break, high_volatility, liquidity_risk
         rank 为每个 date 截面内的 score 降序排名（1 = 最高分）
         """
-        panel = self.scoring_service.score_many_stocks_history(codes, start_date, end_date)
+        panel = self.scoring_service.score_many_stocks_history(
+            codes, start_date, end_date, max_workers=max_workers
+        )
         if panel.empty:
             return panel
         panel["rank"] = (
@@ -358,7 +378,6 @@ class TemporalFilterValidationService:
         if not holdings_by_date or not price_data:
             return pd.Series(dtype=float)
 
-        # 收集所有交易日
         all_dates = sorted(set().union(*[df.index for df in price_data.values() if not df.empty]))
         if not all_dates:
             return pd.Series(dtype=float)
@@ -367,20 +386,20 @@ class TemporalFilterValidationService:
 
         nav = 1.0
         nav_series = {}
-        current_holdings: list = []
+        current_holdings_set: set = set()
         current_weights: dict = {}
         prev_prices: dict = {}
 
         for date in all_dates:
-            # Check if this is a rebalance date (or past one)
             applicable = [rd for rd in rebalance_dates if rd <= date]
             if applicable:
                 latest_rebalance = max(applicable)
                 new_holdings = holdings_by_date[latest_rebalance]
-                # Only rebalance if holdings changed
-                if new_holdings != current_holdings:
-                    current_holdings = new_holdings
-                    valid = [c for c in current_holdings if c in price_data and not price_data[c].empty]
+                new_set = set(new_holdings)
+                # 用集合比较，避免顺序敏感触发不必要的再平衡
+                if new_set != current_holdings_set:
+                    current_holdings_set = new_set
+                    valid = [c for c in new_holdings if c in price_data and not price_data[c].empty]
                     if valid:
                         w = 1.0 / len(valid)
                         current_weights = {c: w for c in valid}
@@ -393,7 +412,6 @@ class TemporalFilterValidationService:
                         if len(avail) > 0:
                             prev_prices[c] = float(df.loc[avail[-1], "close"])
 
-            # Compute daily portfolio return
             if current_weights and prev_prices:
                 port_ret = 0.0
                 for c, w in current_weights.items():
@@ -551,7 +569,7 @@ class TemporalFilterValidationService:
 
         nav = 1.0
         nav_series = {}
-        current_holdings: list = []
+        current_holdings_set: set = set()
         current_weights: dict = {}
         prev_prices: dict = {}
 
@@ -560,9 +578,11 @@ class TemporalFilterValidationService:
             if applicable:
                 latest_rebalance = max(applicable)
                 new_holdings = holdings_by_date[latest_rebalance]
-                if new_holdings != current_holdings:
-                    current_holdings = new_holdings
-                    valid = [c for c in current_holdings if c in price_data and not price_data[c].empty]
+                new_set = set(new_holdings)
+                # 用集合比较，避免顺序敏感触发不必要的再平衡
+                if new_set != current_holdings_set:
+                    current_holdings_set = new_set
+                    valid = [c for c in new_holdings if c in price_data and not price_data[c].empty]
                     # Each stock gets 1/top_n weight; remaining is cash
                     w = 1.0 / top_n if top_n > 0 else 0.0
                     current_weights = {c: w for c in valid}

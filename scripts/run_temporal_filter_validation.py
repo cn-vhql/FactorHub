@@ -76,7 +76,7 @@ def main():
 
         # Step 4: Build score panel
         score_panel = validation_service.build_score_panel(
-            codes, args.start_date, args.end_date
+            codes, args.start_date, args.end_date, max_workers=args.max_workers
         )
 
         # Step 5: Build forward returns
