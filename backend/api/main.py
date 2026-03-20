@@ -26,7 +26,8 @@ from .routers import (
     mining,
     portfolio,
     backtest,
-    data
+    data,
+    scoring
 )
 
 
@@ -105,6 +106,7 @@ app.include_router(mining.router, prefix="/api/mining", tags=["因子挖掘"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["组合分析"])
 app.include_router(backtest.router, prefix="/api/backtest", tags=["策略回测"])
 app.include_router(data.router, prefix="/api/data", tags=["数据管理"])
+app.include_router(scoring.router, prefix="/api/scoring", tags=["时序打分"])
 
 
 @app.get("/")
