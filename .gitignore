@@ -1,7 +1,7 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
+*.class
 *.so
 .Python
 build/
@@ -19,12 +19,24 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.hypothesis/
 
 # Virtual environments
 .venv/
 venv/
 ENV/
 env/
+
+# Data directories
+data/cache/
+data/db/
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data*/
+
+# .kiro: track specs, ignore local settings
+.kiro/settings/
 
 # IDE
 .vscode/
@@ -33,17 +45,13 @@ env/
 *.swo
 *~
 
-# Data and databases
-data/*.db
-data/*.sqlite
-data/*.sqlite3
-data/cache/
-logs/*.log
+# Logs
+logs/
+backend.log
 
 # Environment variables
 .env
 .env.local
-
 
 # OS
 .DS_Store
@@ -52,21 +60,17 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.bak
-*.swp
-data/db/factorflow.db
+
+# Pytest
 .pytest_cache
+
+# Misc
 todo.md
-tests/
 web_demo.md
 memory/
 docs/
 nul
 skills
-data/db/factorflow.db
-data/db/factorflow.db
-logs/
 vite-app/
 vite-naive-ui/
-
 CLAUDE.md
-scripts/
