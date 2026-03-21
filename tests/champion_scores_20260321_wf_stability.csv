@@ -1,0 +1,11 @@
+﻿profile_id,stability_score,test_sharpe,test_annual_return,test_max_drawdown,n_windows
+momentum_v1,27.5,,,,7
+mean_reversion_v1,27.5,,,,7
+trend_flow_v1,27.5,,,,7
+hybrid_v1,27.5,,,,7
+low_vol_trend_v1,27.5,,,,7
+breakout_v1,27.5,,,,7
+macd_momentum_v1,27.5,,,,7
+vol_contraction_v1,27.5,,,,7
+multi_ma_align_v1,27.5,,,,7
+short_reversal_v1,27.5,,,,7
