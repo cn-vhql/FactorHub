@@ -76,9 +76,9 @@ def main():
     args = parse_args()
     trade_date = args.date
 
-    # 加载股票池
-    pool_df = pd.read_csv(args.pool)
-    codes = pool_df["code"].astype(str).str.strip().tolist()
+    # 加载股票池（dtype=str 保留前导零，如 000928）
+    pool_df = pd.read_csv(args.pool, dtype=str)
+    codes = pool_df["code"].str.strip().str.zfill(6).tolist()
     print(f"股票池：{len(codes)} 只股票，交易日期：{trade_date}")
 
     # 加载所有 temporal_pool profile

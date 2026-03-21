@@ -125,8 +125,11 @@ class DataService:
         """标准化股票代码格式"""
         code = code.strip().upper()
         if not code.endswith((".SH", ".SZ")):
+            # 补齐 6 位前导零（如 "928" -> "000928"）
+            if code.isdigit() and len(code) < 6:
+                code = code.zfill(6)
             # 自动判断上海或深圳
-            if code.startswith("6"):
+            if code.startswith("6") or code.startswith("9"):
                 return f"{code}.SH"
             elif code.startswith(("0", "3")):
                 return f"{code}.SZ"
