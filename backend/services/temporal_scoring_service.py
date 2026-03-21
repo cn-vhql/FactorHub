@@ -220,6 +220,263 @@ class TemporalScoringService:
         return float(np.clip(score, 0, 100))
 
     # ------------------------------------------------------------------
+    # Profile 驱动：因子计算
+    # ------------------------------------------------------------------
+
+    def _compute_factors_from_profile(self, df: pd.DataFrame, profile: dict) -> dict:
+        """
+        按 profile 的 factors 列表动态计算因子值。
+
+        Args:
+            df: 包含 OHLCV 数据的 DataFrame
+            profile: profile 配置字典，含 factors 列表
+
+        Returns:
+            {factor_name: pd.Series} 字典，每个值为完整时间序列
+        """
+        # 先计算所有 8 个内置因子（复用现有逻辑）
+        all_factors = self._compute_factors(df)
+
+        # 按 profile 中的因子名过滤，只返回 profile 需要的因子
+        result: dict[str, pd.Series] = {}
+        for factor_cfg in profile.get("factors", []):
+            name = factor_cfg["name"]
+            if name in all_factors:
+                result[name] = all_factors[name]
+            else:
+                # 尝试通过 factor_service 计算未知因子
+                try:
+                    from backend.services.factor_service import factor_service as _fs
+                    # 尝试从预置因子表获取表达式
+                    from backend.core.database import get_db_session
+                    from backend.repositories.factor_repository import FactorRepository
+                    db = get_db_session()
+                    repo = FactorRepository(db)
+                    factor_obj = repo.get_by_name(name)
+                    db.close()
+                    if factor_obj:
+                        result[name] = _fs.calculator.calculate(df, factor_obj.code)
+                    else:
+                        logger.warning(f"因子 {name} 在内置因子和预置因子表中均未找到，跳过")
+                except Exception as exc:
+                    logger.warning(f"计算因子 {name} 失败: {exc}，跳过")
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Profile 驱动：评分合成
+    # ------------------------------------------------------------------
+
+    def _compute_score_from_profile(self, pcts: dict, profile: dict) -> float:
+        """
+        按 profile 的 weight/direction/threshold 合成分数。
+
+        规则：
+        - signal 因子：score += weight * direction * pct * 100
+        - risk_filter 因子：如果 pct > threshold，则 score = 0（过滤掉）
+
+        Args:
+            pcts: {factor_name: percentile_value} 字典，每个值 ∈ [0, 1]
+            profile: profile 配置字典
+
+        Returns:
+            综合评分，范围 [0, 100]
+        """
+        score = 0.0
+
+        for factor_cfg in profile.get("factors", []):
+            name = factor_cfg["name"]
+            role = factor_cfg.get("role", "signal")
+            pct = pcts.get(name, 0.0)
+
+            if role == "risk_filter":
+                threshold = factor_cfg.get("threshold", 0.8)
+                direction = factor_cfg.get("direction", 1)
+                # direction=-1 表示"越高越危险"（如 atr_norm），pct > threshold 时过滤
+                # direction=1 表示"越低越危险"（如 volume_ma_ratio），pct < threshold 时过滤
+                if direction == -1 and pct > threshold:
+                    return 0.0
+                elif direction == 1 and pct < threshold:
+                    return 0.0
+            else:
+                # signal 因子
+                weight = factor_cfg.get("weight", 0.0)
+                direction = factor_cfg.get("direction", 1)
+                score += weight * direction * pct * 100
+
+        return float(np.clip(score, 0.0, 100.0))
+
+    # ------------------------------------------------------------------
+    # Profile 驱动：单只股票评分
+    # ------------------------------------------------------------------
+
+    def score_one_stock_with_profile(
+        self, code: str, trade_date: str, profile_id: str
+    ) -> dict:
+        """
+        按 profile 配置对单只股票打分。
+
+        Args:
+            code: 股票代码，如 "600519"
+            trade_date: 交易日期，格式 "YYYY-MM-DD"
+            profile_id: profile 唯一标识
+
+        Returns:
+            包含 date、code、score、factors、pcts 的字典
+            score ∈ [0, 100]，pcts 中每个值 ∈ [0, 1]
+
+        Raises:
+            KeyError: profile_id 不存在
+            ValueError: 数据不足或因子计算失败
+        """
+        from backend.services.factor_profile_registry_service import FactorProfileRegistryService
+        registry = FactorProfileRegistryService()
+        profile = registry.get_profile(profile_id)
+
+        percentile_window = profile.get("params", {}).get("percentile_window", 252)
+
+        df = self._get_history_data(code, trade_date)
+        factor_series = self._compute_factors_from_profile(df, profile)
+
+        # 解析实际交易日
+        trade_date_ts = pd.Timestamp(trade_date)
+        available = df.index[df.index <= trade_date_ts]
+        if available.empty:
+            raise ValueError(f"股票 {code} 在 {trade_date} 之前无可用数据")
+        actual_date_ts = available[-1]
+        actual_date = actual_date_ts.strftime("%Y-%m-%d")
+
+        # 取实际交易日的因子值
+        factors_current: dict[str, float] = {}
+        for name, series in factor_series.items():
+            if actual_date_ts in series.index:
+                val = series.loc[actual_date_ts]
+            else:
+                val = series.dropna().iloc[-1] if not series.dropna().empty else float("nan")
+            factors_current[name] = float(val)
+
+        # 计算百分位
+        pcts: dict[str, float] = {}
+        for name, series in factor_series.items():
+            current_val = factors_current[name]
+            if np.isnan(current_val):
+                raise ValueError(f"股票 {code} 因子 {name} 当日值为 NaN")
+            # 使用 profile 指定的 percentile_window 截取历史窗口
+            window_series = series.dropna().iloc[-percentile_window:]
+            pcts[name] = self._compute_percentile(window_series, current_val)
+
+        score = self._compute_score_from_profile(pcts, profile)
+
+        return {
+            "date": actual_date,
+            "code": code,
+            "score": round(score, 1),
+            "factors": factors_current,
+            "pcts": pcts,
+        }
+
+    # ------------------------------------------------------------------
+    # Profile 驱动：历史批量评分
+    # ------------------------------------------------------------------
+
+    def score_stock_history_with_profile(
+        self,
+        code: str,
+        start_date: str,
+        end_date: str,
+        profile_id: str,
+        window: int = 252,
+    ) -> pd.DataFrame:
+        """
+        按 profile 配置计算单只股票历史评分面板。
+
+        Args:
+            code: 股票代码
+            start_date: 开始日期，格式 "YYYY-MM-DD"
+            end_date: 结束日期，格式 "YYYY-MM-DD"
+            profile_id: profile 唯一标识
+            window: 滚动窗口大小（交易日数），默认 252
+
+        Returns:
+            包含 date, code, score 列的 DataFrame
+
+        Raises:
+            KeyError: profile_id 不存在
+            ValueError: 有效交易日数 < window + 20
+        """
+        # 缓存 key 包含 profile_id，避免不同 profile 缓存冲突
+        cache_path = self.score_cache_dir / f"{code}_{start_date}_{end_date}_{profile_id}.parquet"
+        if cache_path.exists():
+            return pd.read_parquet(cache_path)
+
+        from backend.services.factor_profile_registry_service import FactorProfileRegistryService
+        registry = FactorProfileRegistryService()
+        profile = registry.get_profile(profile_id)
+
+        # 一次 IO 拉取足够的历史数据
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        fetch_start = (start_dt - timedelta(days=window)).strftime("%Y-%m-%d")
+        df = data_service.get_stock_data(code, fetch_start, end_date)
+
+        if len(df) < window + 20:
+            raise ValueError(
+                f"股票 {code} 有效交易日数 {len(df)} < window + 20 ({window + 20})"
+            )
+
+        # 计算 profile 所需因子时间序列
+        factor_series = self._compute_factors_from_profile(df, profile)
+        if not factor_series:
+            raise ValueError(f"Profile {profile_id} 未能计算任何因子")
+
+        factor_df = pd.DataFrame(factor_series)
+        rolling_rank = factor_df.rolling(window=window, min_periods=20).rank(pct=True)
+
+        # 按 profile 合成分数（向量化）
+        score_series = pd.Series(0.0, index=df.index)
+        filtered_mask = pd.Series(False, index=df.index)
+
+        for factor_cfg in profile.get("factors", []):
+            name = factor_cfg["name"]
+            role = factor_cfg.get("role", "signal")
+            if name not in rolling_rank.columns:
+                continue
+
+            pct_col = rolling_rank[name]
+
+            if role == "risk_filter":
+                threshold = factor_cfg.get("threshold", 0.8)
+                direction = factor_cfg.get("direction", 1)
+                if direction == -1:
+                    filtered_mask = filtered_mask | (pct_col > threshold)
+                else:
+                    filtered_mask = filtered_mask | (pct_col < threshold)
+            else:
+                weight = factor_cfg.get("weight", 0.0)
+                direction = factor_cfg.get("direction", 1)
+                score_series = score_series + weight * direction * pct_col * 100
+
+        # 应用风险过滤
+        score_series = score_series.where(~filtered_mask, other=0.0)
+        score_series = score_series.clip(0, 100)
+
+        result = pd.DataFrame({
+            "date": df.index,
+            "code": code,
+            "score": score_series.values,
+        })
+
+        # 只保留 [start_date, end_date] 区间，过滤 NaN
+        result = result[
+            (result["date"] >= pd.Timestamp(start_date))
+            & (result["date"] <= pd.Timestamp(end_date))
+        ].dropna(subset=["score"]).reset_index(drop=True)
+
+        # 缓存结果
+        result.to_parquet(cache_path, index=False)
+
+        return result
+
+    # ------------------------------------------------------------------
     # 单只股票评分
     # ------------------------------------------------------------------
 
@@ -389,11 +646,11 @@ class TemporalScoringService:
             "liquidity_risk": liquidity_risk.values,
         })
 
-        # 只保留 [start_date, end_date] 区间
+        # 只保留 [start_date, end_date] 区间，并过滤掉 score 为 NaN 的行
         result = result[
             (result["date"] >= pd.Timestamp(start_date))
             & (result["date"] <= pd.Timestamp(end_date))
-        ].reset_index(drop=True)
+        ].dropna(subset=["score"]).reset_index(drop=True)
 
         # 缓存结果
         result.to_parquet(cache_path, index=False)

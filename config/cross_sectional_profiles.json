@@ -1,0 +1,59 @@
+{
+  "profiles": [
+    {
+      "id": "cross_sectional_momentum_v1",
+      "mode": "cross_sectional_filter",
+      "description": "截面动量模板 - 横截面动量因子组合",
+      "source": "builtin",
+      "version": "1.0",
+      "factors": [
+        {"name": "momentum_20",      "direction": 1,  "weight": 0.35},
+        {"name": "price_vs_sma20",   "direction": 1,  "weight": 0.25},
+        {"name": "atr_norm",         "direction": -1, "weight": 0.20},
+        {"name": "volume_ma_ratio",  "direction": 1,  "weight": 0.20}
+      ],
+      "params": {
+        "rebalance": "W-FRI",
+        "top_percentile": 0.10,
+        "direction": "long"
+      }
+    },
+    {
+      "id": "cross_sectional_value_v1",
+      "mode": "cross_sectional_filter",
+      "description": "截面价值模板 - 低估值 + 低波动",
+      "source": "builtin",
+      "version": "1.0",
+      "factors": [
+        {"name": "deviation_from_ma20","direction": -1, "weight": 0.40},
+        {"name": "bollinger_position", "direction": -1, "weight": 0.30},
+        {"name": "atr_norm",           "direction": -1, "weight": 0.30}
+      ],
+      "params": {
+        "rebalance": "W-FRI",
+        "top_percentile": 0.10,
+        "direction": "long"
+      }
+    },
+    {
+      "id": "cross_sectional_composite_v1",
+      "mode": "cross_sectional_filter",
+      "description": "截面综合模板 - 多因子均衡配置",
+      "source": "builtin",
+      "version": "1.0",
+      "factors": [
+        {"name": "momentum_20",       "direction": 1,  "weight": 0.20},
+        {"name": "price_vs_sma20",    "direction": 1,  "weight": 0.20},
+        {"name": "roc_10",            "direction": 1,  "weight": 0.15},
+        {"name": "force_index_ma",    "direction": 1,  "weight": 0.15},
+        {"name": "atr_norm",          "direction": -1, "weight": 0.15},
+        {"name": "volume_ma_ratio",   "direction": 1,  "weight": 0.15}
+      ],
+      "params": {
+        "rebalance": "W-FRI",
+        "top_percentile": 0.10,
+        "direction": "long"
+      }
+    }
+  ]
+}

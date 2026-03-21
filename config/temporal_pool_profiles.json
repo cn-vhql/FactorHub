@@ -1,0 +1,117 @@
+{
+  "profiles": [
+    {
+      "id": "momentum_v1",
+      "mode": "temporal_pool",
+      "description": "趋势动量模板 - 复用现有 8 因子默认配置",
+      "source": "builtin",
+      "version": "1.0",
+      "factors": [
+        {"name": "price_vs_sma20",    "direction": 1,  "weight": 0.22, "role": "signal"},
+        {"name": "momentum_20",       "direction": 1,  "weight": 0.18, "role": "signal"},
+        {"name": "price_vwma_ratio",  "direction": 1,  "weight": 0.16, "role": "signal"},
+        {"name": "force_index_ma",    "direction": 1,  "weight": 0.14, "role": "signal"},
+        {"name": "bollinger_position","direction": 1,  "weight": 0.14, "role": "signal"},
+        {"name": "stochastic_d",      "direction": 1,  "weight": 0.16, "role": "signal"},
+        {"name": "atr_norm",          "direction": -1, "weight": 0.0,  "role": "risk_filter", "threshold": 0.80},
+        {"name": "volume_ma_ratio",   "direction": 1,  "weight": 0.0,  "role": "risk_filter", "threshold": 0.30}
+      ],
+      "params": {
+        "rebalance": "W-FRI",
+        "hold_days": 5,
+        "top_n": 10,
+        "score_threshold": 70,
+        "percentile_window": 252
+      }
+    },
+    {
+      "id": "mean_reversion_v1",
+      "mode": "temporal_pool",
+      "description": "均值回归模板 - 超跌反弹策略",
+      "source": "builtin",
+      "version": "1.0",
+      "factors": [
+        {"name": "deviation_from_ma20","direction": -1, "weight": 0.30, "role": "signal"},
+        {"name": "bollinger_position", "direction": -1, "weight": 0.25, "role": "signal"},
+        {"name": "stochastic_d",       "direction": -1, "weight": 0.25, "role": "signal"},
+        {"name": "rsi_14",             "direction": -1, "weight": 0.20, "role": "signal"},
+        {"name": "atr_norm",           "direction": -1, "weight": 0.0,  "role": "risk_filter", "threshold": 0.85},
+        {"name": "volume_ma_ratio",    "direction": 1,  "weight": 0.0,  "role": "risk_filter", "threshold": 0.20}
+      ],
+      "params": {
+        "rebalance": "W-FRI",
+        "hold_days": 5,
+        "top_n": 10,
+        "score_threshold": 65,
+        "percentile_window": 252
+      }
+    },
+    {
+      "id": "trend_flow_v1",
+      "mode": "temporal_pool",
+      "description": "趋势量能模板 - 趋势 + 量能共振",
+      "source": "builtin",
+      "version": "1.0",
+      "factors": [
+        {"name": "price_vs_sma20",   "direction": 1,  "weight": 0.28, "role": "signal"},
+        {"name": "momentum_20",      "direction": 1,  "weight": 0.22, "role": "signal"},
+        {"name": "force_index_ma",   "direction": 1,  "weight": 0.25, "role": "signal"},
+        {"name": "volume_ma_ratio",  "direction": 1,  "weight": 0.25, "role": "signal"},
+        {"name": "atr_norm",         "direction": -1, "weight": 0.0,  "role": "risk_filter", "threshold": 0.80}
+      ],
+      "params": {
+        "rebalance": "W-FRI",
+        "hold_days": 5,
+        "top_n": 10,
+        "score_threshold": 68,
+        "percentile_window": 252
+      }
+    },
+    {
+      "id": "hybrid_v1",
+      "mode": "temporal_pool",
+      "description": "混合模板 - 趋势 + 反转 + 量能均衡配置",
+      "source": "builtin",
+      "version": "1.0",
+      "factors": [
+        {"name": "price_vs_sma20",    "direction": 1,  "weight": 0.18, "role": "signal"},
+        {"name": "momentum_20",       "direction": 1,  "weight": 0.15, "role": "signal"},
+        {"name": "bollinger_position","direction": 1,  "weight": 0.15, "role": "signal"},
+        {"name": "stochastic_d",      "direction": 1,  "weight": 0.15, "role": "signal"},
+        {"name": "force_index_ma",    "direction": 1,  "weight": 0.17, "role": "signal"},
+        {"name": "roc_10",            "direction": 1,  "weight": 0.20, "role": "signal"},
+        {"name": "atr_norm",          "direction": -1, "weight": 0.0,  "role": "risk_filter", "threshold": 0.80},
+        {"name": "volume_ma_ratio",   "direction": 1,  "weight": 0.0,  "role": "risk_filter", "threshold": 0.25}
+      ],
+      "params": {
+        "rebalance": "2W-FRI",
+        "hold_days": 10,
+        "top_n": 10,
+        "score_threshold": 65,
+        "percentile_window": 252
+      }
+    },
+    {
+      "id": "low_vol_trend_v1",
+      "mode": "temporal_pool",
+      "description": "低波动趋势模板 - 低波动率 + 稳定趋势",
+      "source": "builtin",
+      "version": "1.0",
+      "factors": [
+        {"name": "price_vs_sma20",   "direction": 1,  "weight": 0.30, "role": "signal"},
+        {"name": "momentum_20",      "direction": 1,  "weight": 0.25, "role": "signal"},
+        {"name": "price_vwma_ratio", "direction": 1,  "weight": 0.25, "role": "signal"},
+        {"name": "cci_20",           "direction": 1,  "weight": 0.20, "role": "signal"},
+        {"name": "atr_norm",         "direction": -1, "weight": 0.0,  "role": "risk_filter", "threshold": 0.60},
+        {"name": "volume_ma_ratio",  "direction": 1,  "weight": 0.0,  "role": "risk_filter", "threshold": 0.30}
+      ],
+      "params": {
+        "rebalance": "2W-FRI",
+        "hold_days": 10,
+        "top_n": 10,
+        "score_threshold": 72,
+        "percentile_window": 252
+      }
+    }
+  ]
+}

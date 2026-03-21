@@ -31,6 +31,7 @@ def _sync_threshold() -> int:
 class ScoringRequest(BaseModel):
     codes: list[str]
     trade_date: Optional[str] = None
+    profile_id: Optional[str] = None
 
 
 class ScoreItem(BaseModel):
@@ -86,10 +87,21 @@ async def sync_score(request: ScoringRequest, background_tasks: BackgroundTasks)
             content={"task_id": task_id, "status": "pending",
                      "detail": f"codes 数量 {len(request.codes)} 超过同步阈值 {_sync_threshold()}，已自动转为异步任务"},
         )
-    results, errors = temporal_scoring_service.score_many_stocks(request.codes, trade_date)
+    if request.profile_id is not None:
+        results: list[dict] = []
+        errors: list[dict] = []
+        for code in request.codes:
+            try:
+                result = temporal_scoring_service.score_one_stock_with_profile(
+                    code, trade_date, request.profile_id
+                )
+                results.append(result)
+            except Exception as exc:
+                errors.append({"code": code, "error": str(exc)})
+    else:
+        results, errors = temporal_scoring_service.score_many_stocks(request.codes, trade_date)
     data = [ScoreItem(date=r["date"], code=r["code"], score=r["score"]) for r in results]
     return SyncScoringResponse(success=True, data=data, errors=errors)
-
 
 @router.post("/temporal-score/jobs", status_code=202, response_model=AsyncJobResponse)
 async def async_score(request: ScoringRequest, background_tasks: BackgroundTasks):

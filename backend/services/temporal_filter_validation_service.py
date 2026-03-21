@@ -87,18 +87,35 @@ class TemporalFilterValidationService:
         codes: list,
         start_date: str,
         end_date: str,
-        max_workers: int = 4,
+        max_workers: int = 1,
+        profile_id: str | None = None,
     ) -> pd.DataFrame:
         """
         构建历史评分面板。
-        返回列：date, code, score, rank, trend_break, high_volatility, liquidity_risk
-        rank 为每个 date 截面内的 score 降序排名（1 = 最高分）
+
+        若传入 profile_id，则调用 TemporalPoolService.score_pool_history 按指定 profile 打分，
+        返回列：date, code, score, rank。
+        否则保持原有行为（默认 8 因子），返回列：date, code, score, rank,
+        trend_break, high_volatility, liquidity_risk。
+
+        rank 为每个 date 截面内的 score 降序排名（1 = 最高分）。
+        max_workers 透传到底层调用。
         """
+        if profile_id is not None:
+            from backend.services.temporal_pool_service import TemporalPoolService
+            pool_svc = TemporalPoolService()
+            panel = pool_svc.score_pool_history(
+                codes, profile_id, start_date, end_date, max_workers=max_workers
+            )
+            return panel
+
         panel = self.scoring_service.score_many_stocks_history(
             codes, start_date, end_date, max_workers=max_workers
         )
         if panel.empty:
             return panel
+        # 先过滤掉 score 为 NaN 的行，再计算排名
+        panel = panel.dropna(subset=["score"]).copy()
         panel["rank"] = (
             panel.groupby("date")["score"]
             .rank(ascending=False, method="first")
@@ -106,6 +123,152 @@ class TemporalFilterValidationService:
         )
         cols = ["date", "code", "score", "rank", "trend_break", "high_volatility", "liquidity_risk"]
         return panel[cols].reset_index(drop=True)
+
+    def run_temporal_pool_backtest(
+        self,
+        codes: list,
+        profile_id: str,
+        start_date: str,
+        end_date: str,
+        top_n: int = 10,
+        score_threshold: Optional[float] = None,
+        rebalance: str = "W-FRI",
+        max_workers: int = 1,
+    ) -> dict:
+        """
+        基于 TemporalPoolService 历史评分面板，模拟 TopN 持仓策略的历史回测。
+
+        Args:
+            codes: 股票代码列表
+            profile_id: profile 唯一标识
+            start_date: 开始日期，格式 "YYYY-MM-DD"
+            end_date: 结束日期，格式 "YYYY-MM-DD"
+            top_n: 每期持仓数量
+            score_threshold: 可选，最低分阈值，低于此分数的股票不进入持仓
+            rebalance: 调仓频率，如 "W-FRI"、"2W-FRI"、"M"
+            max_workers: 并发线程数，透传到 score_pool_history
+
+        Returns:
+            回测指标字典，包含：
+            - annual_return: 年化收益率
+            - sharpe: Sharpe 比率
+            - max_drawdown: 最大回撤（负数）
+            - win_rate: 日胜率
+            - volatility: 年化波动率
+            - total_return: 区间总收益率
+        """
+        from backend.services.temporal_pool_service import TemporalPoolService
+
+        pool_svc = TemporalPoolService()
+
+        # 构建历史评分面板
+        score_panel = pool_svc.score_pool_history(
+            codes, profile_id, start_date, end_date, max_workers=max_workers
+        )
+
+        if score_panel.empty:
+            return {
+                "annual_return": float("nan"),
+                "sharpe": float("nan"),
+                "max_drawdown": float("nan"),
+                "win_rate": float("nan"),
+                "volatility": float("nan"),
+                "total_return": float("nan"),
+            }
+
+        # 获取价格数据
+        all_codes = score_panel["code"].unique().tolist()
+        price_data = self.data_service.get_multiple_stocks_data(all_codes, start_date, end_date)
+
+        # 生成调仓日期
+        all_trading_dates = sorted(score_panel["date"].unique())
+        rebalance_range = pd.date_range(
+            start=all_trading_dates[0],
+            end=all_trading_dates[-1],
+            freq=rebalance,
+        )
+
+        def nearest_trading_date(target):
+            candidates = [d for d in all_trading_dates if d <= target]
+            return candidates[-1] if candidates else None
+
+        # 构建每期持仓
+        holdings: dict = {}
+        for rb_date in rebalance_range:
+            td = nearest_trading_date(rb_date)
+            if td is None:
+                continue
+            day_panel = score_panel[score_panel["date"] == td]
+            if day_panel.empty:
+                continue
+
+            # 应用 score_threshold 过滤
+            if score_threshold is not None:
+                day_panel = day_panel[day_panel["score"] >= score_threshold]
+
+            # 取 TopN
+            top_stocks = day_panel.nlargest(top_n, "score")["code"].tolist()
+            holdings[td] = top_stocks
+
+        if not holdings:
+            return {
+                "annual_return": float("nan"),
+                "sharpe": float("nan"),
+                "max_drawdown": float("nan"),
+                "win_rate": float("nan"),
+                "volatility": float("nan"),
+                "total_return": float("nan"),
+            }
+
+        # 执行等权回测
+        nav_series = self._equal_weight_backtest(holdings, price_data)
+
+        if nav_series.empty or len(nav_series) < 2:
+            return {
+                "annual_return": float("nan"),
+                "sharpe": float("nan"),
+                "max_drawdown": float("nan"),
+                "win_rate": float("nan"),
+                "volatility": float("nan"),
+                "total_return": float("nan"),
+            }
+
+        # 计算回测指标
+        daily_returns = nav_series.pct_change().dropna()
+
+        if len(daily_returns) == 0:
+            return {
+                "annual_return": float("nan"),
+                "sharpe": float("nan"),
+                "max_drawdown": float("nan"),
+                "win_rate": float("nan"),
+                "volatility": float("nan"),
+                "total_return": float("nan"),
+            }
+
+        mean_r = float(daily_returns.mean())
+        std_r = float(daily_returns.std(ddof=1)) if len(daily_returns) > 1 else float("nan")
+        annual_return = mean_r * 252
+        sharpe = mean_r / std_r * np.sqrt(252) if (std_r and not np.isnan(std_r) and std_r != 0) else float("nan")
+        volatility = std_r * np.sqrt(252) if (std_r and not np.isnan(std_r)) else float("nan")
+        win_rate = float((daily_returns > 0).mean())
+
+        # 最大回撤
+        rolling_max = nav_series.cummax()
+        drawdown = (nav_series - rolling_max) / rolling_max
+        max_drawdown = float(drawdown.min())
+
+        # 区间总收益
+        total_return = float(nav_series.iloc[-1] / nav_series.iloc[0] - 1)
+
+        return {
+            "annual_return": annual_return,
+            "sharpe": sharpe,
+            "max_drawdown": max_drawdown,
+            "win_rate": win_rate,
+            "volatility": volatility,
+            "total_return": total_return,
+        }
 
     def build_forward_returns(
         self,

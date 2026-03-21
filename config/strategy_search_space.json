@@ -1,0 +1,68 @@
+{
+  "search_spaces": {
+    "temporal_default": {
+      "description": "时序池默认搜索空间",
+      "mode": "temporal_pool",
+      "candidate_factors": [
+        "price_vs_sma20",
+        "momentum_20",
+        "price_vwma_ratio",
+        "force_index_ma",
+        "bollinger_position",
+        "stochastic_d",
+        "atr_norm",
+        "volume_ma_ratio",
+        "rsi_14",
+        "roc_10",
+        "deviation_from_ma20",
+        "cci_20"
+      ],
+      "factor_groups": {
+        "trend":    ["price_vs_sma20", "momentum_20", "price_vwma_ratio", "roc_10"],
+        "reversal": ["deviation_from_ma20", "bollinger_position", "stochastic_d", "rsi_14", "cci_20"],
+        "flow":     ["force_index_ma", "volume_ma_ratio"],
+        "risk":     ["atr_norm"]
+      },
+      "risk_factors": ["atr_norm"],
+      "min_factors": 4,
+      "max_factors": 8,
+      "max_per_group": 2,
+      "rebalance_choices": ["W-FRI", "2W-FRI"],
+      "hold_days_choices": [5, 10, 20],
+      "top_n_choices": [5, 10, 15],
+      "score_threshold_choices": [60, 65, 70, 75],
+      "n_candidates": 50,
+      "n_random_candidates": 40
+    },
+    "cross_sectional_default": {
+      "description": "截面过滤默认搜索空间",
+      "mode": "cross_sectional_filter",
+      "candidate_factors": [
+        "momentum_20",
+        "price_vs_sma20",
+        "roc_10",
+        "force_index_ma",
+        "atr_norm",
+        "volume_ma_ratio",
+        "deviation_from_ma20",
+        "bollinger_position",
+        "rsi_14",
+        "cci_20"
+      ],
+      "factor_groups": {
+        "trend":    ["momentum_20", "price_vs_sma20", "roc_10"],
+        "reversal": ["deviation_from_ma20", "bollinger_position", "rsi_14", "cci_20"],
+        "flow":     ["force_index_ma", "volume_ma_ratio"],
+        "risk":     ["atr_norm"]
+      },
+      "risk_factors": ["atr_norm"],
+      "min_factors": 3,
+      "max_factors": 6,
+      "max_per_group": 2,
+      "rebalance_choices": ["W-FRI", "2W-FRI"],
+      "top_percentile_choices": [0.05, 0.10, 0.15, 0.20],
+      "n_candidates": 30,
+      "n_random_candidates": 24
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "default_max_workers": 1,
+  "search_timeout_seconds": 1800,
+  "min_history_months": 18,
+  "walk_forward": {
+    "train_months": 12,
+    "valid_months": 3,
+    "test_months": 3,
+    "step_months": 3,
+    "min_windows": 1
+  },
+  "stability_score_weights": {
+    "oos_sharpe":             0.30,
+    "oos_excess_return":      0.20,
+    "drawdown_penalty":       0.15,
+    "ic_ir":                  0.10,
+    "positive_window_ratio":  0.10,
+    "regime_consistency":     0.10,
+    "turnover_penalty":       0.05
+  },
+  "champion_selection": {
+    "min_test_sharpe":        0.0,
+    "min_test_annual_return": -0.20,
+    "overfitting_threshold":  0.30
+  },
+  "execution": {
+    "max_workers":            1,
+    "score_cache_ttl_hours":  24,
+    "task_results_dir":       "data/reports/strategy_search",
+    "champions_dir":          "data/champions"
+  }
+}

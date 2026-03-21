@@ -356,6 +356,116 @@ class VectorBTBacktestService:
             shares_per_trade=shares_per_trade,
         )
 
+    def cross_sectional_backtest_composite(
+        self,
+        df: pd.DataFrame,
+        factor_weights: dict,
+        top_percentile: float = 0.2,
+        direction: str = "long",
+    ) -> Dict:
+        """
+        多因子加权合成截面回测（使用vectorbt）
+
+        Args:
+            df: 包含多只股票数据的DataFrame，行为股票，列为因子名（需含 close 和 stock_code/date 列）
+            factor_weights: {factor_name: weight} 字典，各因子权重（无需归一化，内部自动归一化）
+            top_percentile: 选择股票的百分比（0.10 = 前10%）
+            direction: "long"做多或"short"做空
+
+        Returns:
+            Dict: 回测指标字典，含 annual_return, sharpe, max_drawdown 等
+        """
+        if not factor_weights:
+            raise ValueError("factor_weights 不能为空")
+
+        # 确保索引正确
+        if "date" not in df.columns:
+            df = df.reset_index()
+
+        # 归一化权重
+        total_w = sum(abs(w) for w in factor_weights.values())
+        if total_w == 0:
+            raise ValueError("factor_weights 权重之和不能为 0")
+        norm_weights = {k: v / total_w for k, v in factor_weights.items()}
+
+        # 透视价格数据
+        price_df = df.pivot(index="date", columns="stock_code", values="close")
+        price_df.index = pd.to_datetime(price_df.index)
+
+        # 对每个因子透视并计算截面百分位排名，再加权合成综合分
+        composite_df = pd.DataFrame(0.0, index=price_df.index, columns=price_df.columns)
+        for factor_name, weight in norm_weights.items():
+            if factor_name not in df.columns:
+                continue
+            factor_df = df.pivot(index="date", columns="stock_code", values=factor_name)
+            factor_df.index = pd.to_datetime(factor_df.index)
+            # 截面百分位排名（每行独立排名）
+            factor_rank = factor_df.rank(axis=1, pct=True)
+            composite_df = composite_df.add(factor_rank * weight, fill_value=0.0)
+
+        # 每日按综合分选股，用集合比较确保顺序无关
+        returns_df = price_df.pct_change()
+        signals = pd.DataFrame(False, index=returns_df.index, columns=returns_df.columns)
+
+        prev_selected_set: set = set()
+        for date in composite_df.index:
+            row = composite_df.loc[date].dropna()
+            if row.empty:
+                continue
+            ranks = row.rank(pct=True)
+            if direction == "long":
+                selected_set = set(ranks[ranks >= (1 - top_percentile)].index.tolist())
+            else:
+                selected_set = set(ranks[ranks <= top_percentile].index.tolist())
+
+            # 集合比较，顺序无关
+            if selected_set != prev_selected_set:
+                prev_selected_set = selected_set
+
+            if selected_set:
+                signals.loc[date, list(selected_set)] = True
+
+        # 使用 vectorbt 回测
+        pf = vbt.Portfolio.from_signals(
+            close=price_df,
+            entries=signals,
+            exits=(~signals) & signals.shift(1).fillna(False),
+            init_cash=self.initial_capital,
+            freq="D",
+            cash_sharing=False,
+            fees=self.commission_rate,
+            slippage=self.slippage,
+        )
+
+        equity = pf.value()
+        returns = pf.returns()
+        returns_clean = returns.dropna()
+        stats = pf.stats()
+
+        total_return = stats.get("Total Return [%]", 0) / 100.0
+        annual_return = stats.get("Annual Return [%]", 0) / 100.0
+        if annual_return == 0 or np.isnan(annual_return):
+            n_days = len(returns_clean)
+            if n_days > 0:
+                annual_return = (1 + total_return) ** (252 / n_days) - 1
+
+        volatility = self._calculate_volatility(returns_clean, stats)
+        sharpe = stats.get("Sharpe Ratio", 0)
+        max_drawdown = stats.get("Max Drawdown [%]", 0) / 100.0
+        var_95, cvar_95 = self._calculate_var_cvar(returns_clean)
+
+        return {
+            "annual_return": float(annual_return),
+            "sharpe": float(sharpe),
+            "max_drawdown": float(max_drawdown),
+            "total_return": float(total_return),
+            "volatility": float(volatility),
+            "var_95": float(var_95),
+            "cvar_95": float(cvar_95),
+            "equity_curve": equity,
+            "portfolio_returns": returns,
+        }
+
     def cross_sectional_backtest(
         self,
         df: pd.DataFrame,
@@ -389,38 +499,32 @@ class VectorBTBacktestService:
         # 1. 计算收益率
         returns_df = price_df.pct_change()
 
-        # 2. 每日选择股票（横截面排名）
-        selected_stocks = {}
+        # 2. 每日选择股票（横截面排名），用集合存储确保顺序无关
+        selected_stocks: dict = {}
         for date in factor_df.index:
-            # 计算该日期所有股票的因子排名
             factor_values = factor_df.loc[date].dropna()
             ranks = factor_values.rank(pct=True)
 
-            # 选择股票
             if direction == "long":
-                # 做多：选择排名前 (1-top_percentile) 的股票
-                selected = ranks[ranks >= (1 - top_percentile)].index.tolist()
+                selected_set = set(ranks[ranks >= (1 - top_percentile)].index.tolist())
             else:
-                # 做空：选择排名后 top_percentile 的股票
-                selected = ranks[ranks <= top_percentile].index.tolist()
+                selected_set = set(ranks[ranks <= top_percentile].index.tolist())
 
-            selected_stocks[date] = selected
+            selected_stocks[date] = selected_set
 
-        # 3. 创建信号矩阵
-        # 只有被选中的股票在该日期持有
-        signals = pd.DataFrame(0, index=returns_df.index, columns=returns_df.columns)
+        # 3. 创建信号矩阵（按列名赋值，顺序无关）
+        signals = pd.DataFrame(False, index=returns_df.index, columns=returns_df.columns)
 
-        for date, selected in selected_stocks.items():
-            if selected:  # 确保有股票被选中
-                signals.loc[date, selected] = 1
+        for date, selected_set in selected_stocks.items():
+            if selected_set:
+                signals.loc[date, list(selected_set)] = True
 
         # 4. 使用vectorbt进行回测
-        # 注意：vectorbt的entries表示持仓开始，exits表示持仓结束
-        # 这里我们简化处理：每日调仓，所以entries=signals，exits=signals.shift(-1)
+        # 每日调仓：entries=signals，exits=持仓变化时退出
         pf = vbt.Portfolio.from_signals(
             close=price_df,
             entries=signals,
-            exits=signals.shift(-1).fillna(0),
+            exits=(~signals) & signals.shift(1).fillna(False),
             init_cash=self.initial_capital,
             freq="D",
             cash_sharing=False,
