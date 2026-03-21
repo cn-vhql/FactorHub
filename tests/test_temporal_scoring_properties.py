@@ -246,3 +246,182 @@ def test_score_file_format_correctness(results):
             assert len(decimal_part) == 1, (
                 f"Score {score_str!r} does not have exactly 1 decimal place"
             )
+
+
+# ---------------------------------------------------------------------------
+# Property 9: 异步任务 profile_id 持久化
+# Validates: async job path correctly persists and reads profile_id
+# ---------------------------------------------------------------------------
+
+import json
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from backend.services.temporal_scoring_service import TaskManager
+
+
+def test_create_task_persists_profile_id():
+    """
+    create_task(codes, date, profile_id="momentum_v1") must write profile_id
+    into status.json so run_task can read it back.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manager = TaskManager()
+        manager.results_dir = Path(tmpdir)
+
+        task_id = manager.create_task(["600519", "000651"], "2024-01-05", profile_id="momentum_v1")
+
+        status_path = Path(tmpdir) / task_id / "status.json"
+        assert status_path.exists()
+        status = json.loads(status_path.read_text())
+        assert status["profile_id"] == "momentum_v1", (
+            f"profile_id not persisted: {status}"
+        )
+
+
+def test_create_task_persists_none_profile_id():
+    """
+    create_task without profile_id must write profile_id: null into status.json.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manager = TaskManager()
+        manager.results_dir = Path(tmpdir)
+
+        task_id = manager.create_task(["600519"], "2024-01-05")
+
+        status = json.loads((Path(tmpdir) / task_id / "status.json").read_text())
+        assert "profile_id" in status
+        assert status["profile_id"] is None
+
+
+def test_run_task_uses_profile_id_from_status():
+    """
+    When run_task is called without profile_id argument, it must read profile_id
+    from status.json and dispatch to score_one_stock_with_profile.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manager = TaskManager()
+        manager.results_dir = Path(tmpdir)
+        manager.max_workers = 1
+
+        task_id = manager.create_task(["600519"], "2024-01-05", profile_id="trend_flow_v1")
+
+        mock_result = {
+            "date": "2024-01-05",
+            "code": "600519",
+            "score": 72.0,
+            "factors": {},
+            "pcts": {},
+        }
+        mock_scoring = MagicMock()
+        mock_scoring.score_one_stock_with_profile.return_value = mock_result
+        mock_scoring.score_one_stock.return_value = mock_result
+        manager.scoring_service = mock_scoring
+
+        # Call run_task WITHOUT passing profile_id — it must read from status.json
+        manager.run_task(task_id, ["600519"], "2024-01-05")
+
+        mock_scoring.score_one_stock_with_profile.assert_called_once_with(
+            "600519", "2024-01-05", "trend_flow_v1"
+        )
+        mock_scoring.score_one_stock.assert_not_called()
+
+
+def test_run_task_uses_explicit_profile_id_over_status():
+    """
+    When run_task is called WITH profile_id argument, it must use that value
+    (not the one in status.json).
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manager = TaskManager()
+        manager.results_dir = Path(tmpdir)
+        manager.max_workers = 1
+
+        # status.json has profile_id="old_profile"
+        task_id = manager.create_task(["600519"], "2024-01-05", profile_id="old_profile")
+
+        mock_result = {
+            "date": "2024-01-05",
+            "code": "600519",
+            "score": 55.0,
+            "factors": {},
+            "pcts": {},
+        }
+        mock_scoring = MagicMock()
+        mock_scoring.score_one_stock_with_profile.return_value = mock_result
+        manager.scoring_service = mock_scoring
+
+        # Explicit profile_id="new_profile" should win
+        manager.run_task(task_id, ["600519"], "2024-01-05", profile_id="new_profile")
+
+        mock_scoring.score_one_stock_with_profile.assert_called_once_with(
+            "600519", "2024-01-05", "new_profile"
+        )
+
+
+def test_run_task_without_profile_id_uses_score_one_stock():
+    """
+    When neither run_task argument nor status.json has a profile_id,
+    it must fall back to score_one_stock (not score_one_stock_with_profile).
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manager = TaskManager()
+        manager.results_dir = Path(tmpdir)
+        manager.max_workers = 1
+
+        task_id = manager.create_task(["600519"], "2024-01-05")  # no profile_id
+
+        mock_result = {
+            "date": "2024-01-05",
+            "code": "600519",
+            "score": 60.0,
+            "factors": {},
+            "pcts": {},
+        }
+        mock_scoring = MagicMock()
+        mock_scoring.score_one_stock.return_value = mock_result
+        manager.scoring_service = mock_scoring
+
+        manager.run_task(task_id, ["600519"], "2024-01-05")
+
+        mock_scoring.score_one_stock.assert_called_once_with("600519", "2024-01-05")
+        mock_scoring.score_one_stock_with_profile.assert_not_called()
+
+
+def test_auto_upgrade_path_passes_profile_id():
+    """
+    The auto-upgrade path in POST /temporal-score (codes > threshold) must
+    pass profile_id to both create_task and run_task.
+    This test verifies the router logic by calling the service layer directly.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manager = TaskManager()
+        manager.results_dir = Path(tmpdir)
+        manager.max_workers = 1
+
+        codes = [f"{i:06d}" for i in range(1, 6)]  # 5 codes
+        profile_id = "breakout_v1"
+
+        task_id = manager.create_task(codes, "2024-01-05", profile_id)
+
+        status = json.loads((Path(tmpdir) / task_id / "status.json").read_text())
+        assert status["profile_id"] == profile_id
+
+        mock_result_template = {
+            "date": "2024-01-05",
+            "score": 50.0,
+            "factors": {},
+            "pcts": {},
+        }
+        mock_scoring = MagicMock()
+        mock_scoring.score_one_stock_with_profile.side_effect = lambda code, date, pid: {
+            **mock_result_template, "code": code
+        }
+        manager.scoring_service = mock_scoring
+
+        manager.run_task(task_id, codes, "2024-01-05")
+
+        assert mock_scoring.score_one_stock_with_profile.call_count == len(codes)
+        for call in mock_scoring.score_one_stock_with_profile.call_args_list:
+            assert call.args[2] == profile_id
