@@ -32,6 +32,9 @@ class ScoringRequest(BaseModel):
     codes: list[str]
     trade_date: Optional[str] = None
     profile_id: Optional[str] = None
+    # 每股独立 profile：{"600519": "trend_flow_v1", "000651": "breakout_v1"}
+    # 优先级高于 profile_id；未在此字典中的股票回退到 profile_id 或默认评分
+    per_stock_profiles: Optional[dict[str, str]] = None
 
 
 class ScoreItem(BaseModel):
@@ -77,29 +80,34 @@ async def sync_score(request: ScoringRequest, background_tasks: BackgroundTasks)
     if len(request.codes) > _sync_threshold():
         # 超限自动转异步，避免阻塞 worker
         try:
-            task_id = task_manager.create_task(request.codes, trade_date)
+            task_id = task_manager.create_task(request.codes, trade_date, request.profile_id)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
-        background_tasks.add_task(task_manager.run_task, task_id, request.codes, trade_date)
+        background_tasks.add_task(
+            task_manager.run_task, task_id, request.codes, trade_date, request.profile_id
+        )
         from fastapi.responses import JSONResponse
         return JSONResponse(
             status_code=202,
             content={"task_id": task_id, "status": "pending",
                      "detail": f"codes 数量 {len(request.codes)} 超过同步阈值 {_sync_threshold()}，已自动转为异步任务"},
         )
-    if request.profile_id is not None:
-        results: list[dict] = []
-        errors: list[dict] = []
-        for code in request.codes:
-            try:
+    results: list[dict] = []
+    errors: list[dict] = []
+    per_stock = request.per_stock_profiles or {}
+    for code in request.codes:
+        # 优先级：per_stock_profiles[code] > profile_id > 默认评分
+        effective_profile = per_stock.get(code) or request.profile_id
+        try:
+            if effective_profile is not None:
                 result = temporal_scoring_service.score_one_stock_with_profile(
-                    code, trade_date, request.profile_id
+                    code, trade_date, effective_profile
                 )
-                results.append(result)
-            except Exception as exc:
-                errors.append({"code": code, "error": str(exc)})
-    else:
-        results, errors = temporal_scoring_service.score_many_stocks(request.codes, trade_date)
+            else:
+                result = temporal_scoring_service.score_one_stock(code, trade_date)
+            results.append(result)
+        except Exception as exc:
+            errors.append({"code": code, "error": str(exc)})
     data = [ScoreItem(date=r["date"], code=r["code"], score=r["score"]) for r in results]
     return SyncScoringResponse(success=True, data=data, errors=errors)
 
@@ -108,10 +116,12 @@ async def async_score(request: ScoringRequest, background_tasks: BackgroundTasks
     """异步任务创建（需求 2.1-2.5）"""
     trade_date = _resolve_trade_date(request.trade_date)
     try:
-        task_id = task_manager.create_task(request.codes, trade_date)
+        task_id = task_manager.create_task(request.codes, trade_date, request.profile_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    background_tasks.add_task(task_manager.run_task, task_id, request.codes, trade_date)
+    background_tasks.add_task(
+        task_manager.run_task, task_id, request.codes, trade_date, request.profile_id
+    )
     return AsyncJobResponse(task_id=task_id, status="pending")
 
 

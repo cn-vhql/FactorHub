@@ -1,202 +1,235 @@
 """
-对 magic_formula_top10_pool.csv 中的股票，用所有 temporal_pool profile 打分，
-并通过 walk-forward 回测评估每个 profile 的稳定性，选出每只股票的冠军策略。
+对 magic_formula_top10_pool.csv 中的每只股票，独立搜索其冠军策略，
+再用各自冠军 profile 打当日分，汇总输出 Top10（附失败原因）。
 
 用法：
-    python scripts/champion_score_magic_formula.py [--date YYYY-MM-DD] [--start YYYY-MM-DD]
+    python scripts/champion_score_magic_formula.py [--date YYYY-MM-DD] [--start YYYY-MM-DD] [--end YYYY-MM-DD]
+    python scripts/champion_score_magic_formula.py --no-wf   # 跳过搜索，直接用已缓存冠军打分
 """
 from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, date
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import pandas as pd
-import numpy as np
 
-from backend.services.factor_profile_registry_service import FactorProfileRegistryService
+from backend.services.champion_strategy_service import ChampionStrategyService
 from backend.services.temporal_scoring_service import TemporalScoringService
-from backend.services.strategy_evaluation_service import StrategyEvaluationService
 
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Magic Formula 冠军策略打分")
-    parser.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"), help="当日打分日期")
-    parser.add_argument("--start", default="2023-01-01", help="walk-forward 回测起始日期")
-    parser.add_argument("--end", default=datetime.now().strftime("%Y-%m-%d"), help="walk-forward 回测结束日期")
-    parser.add_argument("--pool", default=str(ROOT / "tests" / "magic_formula_top10_pool.csv"))
+    today = datetime.now().strftime("%Y-%m-%d")
+    parser = argparse.ArgumentParser(description="Magic Formula 逐股冠军策略打分")
+    parser.add_argument("--date",  default=today,         help="当日打分日期 YYYY-MM-DD")
+    parser.add_argument("--start", default="2022-01-01",  help="冠军搜索回测起始日期（需 ≥18 个月跨度）")
+    parser.add_argument("--end",   default=today,         help="冠军搜索回测结束日期")
+    parser.add_argument("--pool",  default=str(ROOT / "tests" / "magic_formula_top10_pool.csv"))
+    parser.add_argument("--space", default="temporal_default", help="search_space_id")
     parser.add_argument(
         "--out",
         default=str(ROOT / "tests" / f"champion_scores_{datetime.now().strftime('%Y%m%d')}.csv"),
     )
-    parser.add_argument("--no-wf", action="store_true", help="跳过 walk-forward 回测，仅输出当日打分")
+    parser.add_argument(
+        "--no-wf", action="store_true",
+        help="跳过冠军搜索，直接从 registry 读取已缓存冠军策略打分",
+    )
     return parser.parse_args()
 
 
-def score_today(codes: list[str], profiles: list[dict], trade_date: str) -> pd.DataFrame:
-    """对所有股票 × 所有 profile 打今日分。"""
-    scoring_svc = TemporalScoringService()
-    rows = []
-    profile_ids = [p["id"] for p in profiles]
+# ── 逐股冠军搜索 ──────────────────────────────────────────────────────────────
 
-    for code in codes:
-        row: dict = {"code": code}
-        for profile in profiles:
-            pid = profile["id"]
-            try:
-                result = scoring_svc.score_one_stock_with_profile(code, trade_date, pid)
-                row[pid] = round(result["score"], 2)
-            except Exception as exc:
-                row[pid] = None
-                print(f"  ⚠ {code}/{pid} 打分失败: {exc}")
-        rows.append(row)
-
-    df = pd.DataFrame(rows)
-    df["today_avg"] = df[profile_ids].mean(axis=1).round(2)
-    df["today_best_profile"] = df[profile_ids].idxmax(axis=1)
-    df["today_best_score"] = df[profile_ids].max(axis=1).round(2)
-    return df
-
-
-def run_walk_forward(
+def find_per_stock_champions(
     codes: list[str],
-    profiles: list[dict],
+    search_space_id: str,
     start_date: str,
     end_date: str,
-) -> pd.DataFrame:
+) -> tuple[dict[str, str], dict[str, str]]:
     """
-    对每个 profile 跑 walk-forward 回测，返回 stability_score 表。
-    行 = profile_id，列 = stability_score / test_sharpe / test_annual_return / test_max_drawdown
+    对每只股票独立运行 run_for_stock，返回：
+      champions: {code: profile_id}   — 成功的股票
+      search_errors: {code: reason}   — 搜索失败的股票
     """
-    eval_svc = StrategyEvaluationService()
-    rows = []
+    svc = ChampionStrategyService()
+    champions: dict[str, str] = {}
+    search_errors: dict[str, str] = {}
 
-    for profile in profiles:
-        pid = profile["id"]
-        candidate = {
-            "profile_id": pid,
-            "config": {"id": pid, "params": profile.get("params", {})},
-        }
-        print(f"  walk-forward: {pid} ...", end=" ", flush=True)
+    for i, code in enumerate(codes, 1):
+        print(f"  [{i}/{len(codes)}] 搜索 {code} 冠军策略 ...", end=" ", flush=True)
         try:
-            result = eval_svc.evaluate_temporal_pool_candidate(
-                candidate=candidate,
-                codes=codes,
+            result = svc.run_for_stock(
+                code=code,
+                search_space_id=search_space_id,
                 start_date=start_date,
                 end_date=end_date,
-                train_months=12,
-                valid_months=3,
-                test_months=3,
-                step_months=3,
             )
-            tm = result.get("test_metrics", {})
-            rows.append({
-                "profile_id": pid,
-                "stability_score": round(result.get("stability_score", 0.0), 2),
-                "test_sharpe": round(tm.get("sharpe", float("nan")), 3),
-                "test_annual_return": round(tm.get("annual_return", float("nan")), 4),
-                "test_max_drawdown": round(tm.get("max_drawdown", float("nan")), 4),
-                "n_windows": len(result.get("window_metrics", [])),
-            })
-            print(f"stability={result.get('stability_score', 0):.1f}")
+            pid = result.get("profile_id", "")
+            stability = result.get("stability_score", float("nan"))
+            champions[code] = pid
+            print(f"✓ {pid}  stability={stability:.1f}")
         except Exception as exc:
-            print(f"失败: {exc}")
-            rows.append({
-                "profile_id": pid,
-                "stability_score": 0.0,
-                "test_sharpe": float("nan"),
-                "test_annual_return": float("nan"),
-                "test_max_drawdown": float("nan"),
-                "n_windows": 0,
+            search_errors[code] = str(exc)
+            print(f"✗ {exc}")
+
+    return champions, search_errors
+
+
+def load_cached_champions(codes: list[str]) -> tuple[dict[str, str], dict[str, str]]:
+    """
+    从 ChampionRegistryService 读取已缓存的逐股冠军（scope_type=single_stock）。
+    返回 (champions, missing)，missing 中的股票没有缓存记录。
+    """
+    svc = ChampionStrategyService()
+    champions: dict[str, str] = {}
+    missing: dict[str, str] = {}
+
+    for code in codes:
+        champion = svc.get_champion("single_stock", code)
+        if champion and champion.get("profile_id"):
+            champions[code] = champion["profile_id"]
+        else:
+            missing[code] = "registry 中无冠军记录"
+
+    return champions, missing
+
+
+# ── 逐股打分 ──────────────────────────────────────────────────────────────────
+
+def score_with_champions(
+    champions: dict[str, str],
+    trade_date: str,
+) -> tuple[list[dict], dict[str, str]]:
+    """
+    用各股自己的冠军 profile 打当日分。
+    返回 (results, score_errors)。
+    """
+    scoring_svc = TemporalScoringService()
+    results: list[dict] = []
+    score_errors: dict[str, str] = {}
+
+    for code, profile_id in champions.items():
+        try:
+            r = scoring_svc.score_one_stock_with_profile(code, trade_date, profile_id)
+            results.append({
+                "code": code,
+                "champion_profile": profile_id,
+                "score": round(r["score"], 2),
             })
+        except Exception as exc:
+            score_errors[code] = str(exc)
 
-    return pd.DataFrame(rows).set_index("profile_id")
+    return results, score_errors
 
 
-def print_summary(final_df: pd.DataFrame, wf_df: pd.DataFrame | None, profile_ids: list[str]) -> None:
-    print("\n" + "=" * 80)
-    print("  Magic Formula 冠军策略打分结果")
-    print("=" * 80)
+# ── 汇总输出 ──────────────────────────────────────────────────────────────────
 
-    display_cols = ["code", "today_avg", "today_best_profile", "today_best_score"]
-    if wf_df is not None:
-        display_cols += ["champion_profile", "champion_stability", "champion_today_score"]
+def build_summary(
+    results: list[dict],
+    score_errors: dict[str, str],
+    search_errors: dict[str, str],
+) -> pd.DataFrame:
+    """合并成功结果 + 失败记录，按 score 降序，附 rank。"""
+    rows = []
 
-    print(final_df[display_cols].to_string(index=False))
+    # 成功的股票
+    for r in sorted(results, key=lambda x: x["score"], reverse=True):
+        rows.append({
+            "code": r["code"],
+            "champion_profile": r["champion_profile"],
+            "score": r["score"],
+            "status": "ok",
+            "error": "",
+        })
 
-    if wf_df is not None:
-        print("\n" + "=" * 80)
-        print("  各策略 Walk-Forward 稳定性排名")
-        print("=" * 80)
-        wf_sorted = wf_df.sort_values("stability_score", ascending=False)
-        print(wf_sorted[["stability_score", "test_sharpe", "test_annual_return", "test_max_drawdown", "n_windows"]].to_string())
+    # 打分失败（冠军找到但打分出错）
+    for code, reason in score_errors.items():
+        rows.append({
+            "code": code,
+            "champion_profile": "",
+            "score": float("nan"),
+            "status": "score_error",
+            "error": reason,
+        })
 
-    print("\n各策略今日 Top3：")
-    for pid in profile_ids:
-        if pid not in final_df.columns:
-            continue
-        top3 = final_df.nlargest(3, pid)[["code", pid]]
-        codes_str = "  ".join(f"{r['code']}({r[pid]})" for _, r in top3.iterrows())
-        print(f"  {pid:25s}: {codes_str}")
+    # 搜索失败（连冠军都没找到）
+    for code, reason in search_errors.items():
+        rows.append({
+            "code": code,
+            "champion_profile": "",
+            "score": float("nan"),
+            "status": "search_error",
+            "error": reason,
+        })
 
-    print("=" * 80)
+    df = pd.DataFrame(rows)
+    # rank 只给成功的行
+    ok_mask = df["status"] == "ok"
+    df.loc[ok_mask, "rank"] = range(1, ok_mask.sum() + 1)
+    df["rank"] = df["rank"].astype("Int64")  # nullable int，失败行显示 <NA>
+    cols = ["rank", "code", "champion_profile", "score", "status", "error"]
+    return df[cols].reset_index(drop=True)
 
+
+def print_summary(df: pd.DataFrame, trade_date: str) -> None:
+    ok = df[df["status"] == "ok"]
+    fail = df[df["status"] != "ok"]
+
+    print("\n" + "=" * 70)
+    print(f"  逐股冠军策略打分结果  |  日期：{trade_date}")
+    print("=" * 70)
+
+    print(f"\nTop {min(10, len(ok))} 股票：")
+    top10 = ok.head(10)[["rank", "code", "champion_profile", "score"]]
+    print(top10.to_string(index=False))
+
+    if not fail.empty:
+        print(f"\n失败股票（{len(fail)} 只）：")
+        print(fail[["code", "status", "error"]].to_string(index=False))
+
+    print("=" * 70)
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
     args = parse_args()
 
     pool_df = pd.read_csv(args.pool)
-    codes = pool_df["code"].astype(str).str.strip().tolist()
-    print(f"股票池：{len(codes)} 只  |  打分日期：{args.date}  |  回测区间：{args.start} ~ {args.end}")
+    codes = pool_df["code"].astype(str).str.zfill(6).str.strip().tolist()
+    print(f"股票池：{len(codes)} 只  |  打分日期：{args.date}")
 
-    registry = FactorProfileRegistryService()
-    profiles = registry.load_profiles("temporal_pool")
-    profile_ids = [p["id"] for p in profiles]
-    print(f"加载 {len(profiles)} 个 profile：{profile_ids}")
+    # ── Step 1：获取每股冠军 profile ─────────────────────────────────────────
+    if args.no_wf:
+        print("\n[1/2] 从 registry 读取已缓存冠军策略...")
+        champions, search_errors = load_cached_champions(codes)
+        print(f"  命中 {len(champions)} 只，缺失 {len(search_errors)} 只")
+    else:
+        print(f"\n[1/2] 逐股搜索冠军策略（{args.start} ~ {args.end}，space={args.space}）...")
+        champions, search_errors = find_per_stock_champions(
+            codes, args.space, args.start, args.end
+        )
+        print(f"  成功 {len(champions)} 只，失败 {len(search_errors)} 只")
 
-    # ── 今日打分 ──────────────────────────────────────────────────────────────
-    print("\n[1/2] 今日打分...")
-    score_df = score_today(codes, profiles, args.date)
+    # ── Step 2：用各自冠军打当日分 ───────────────────────────────────────────
+    print(f"\n[2/2] 用冠军 profile 打 {args.date} 当日分...")
+    results, score_errors = score_with_champions(champions, args.date)
+    print(f"  成功 {len(results)} 只，失败 {len(score_errors)} 只")
 
-    # ── Walk-Forward 回测 ─────────────────────────────────────────────────────
-    wf_df: pd.DataFrame | None = None
-    if not args.no_wf:
-        print(f"\n[2/2] Walk-Forward 回测（{args.start} ~ {args.end}）...")
-        wf_df = run_walk_forward(codes, profiles, args.start, args.end)
+    # ── 汇总 ─────────────────────────────────────────────────────────────────
+    df = build_summary(results, score_errors, search_errors)
+    print_summary(df, args.date)
 
-    # ── 合并：冠军策略 = stability_score 最高的 profile ──────────────────────
-    final_df = score_df.copy()
-
-    if wf_df is not None:
-        best_profile = wf_df["stability_score"].idxmax()
-        best_stability = wf_df.loc[best_profile, "stability_score"]
-
-        # 冠军策略对每只股票都一样（整个池子共用一个最优 profile）
-        final_df["champion_profile"] = best_profile
-        final_df["champion_stability"] = best_stability
-        final_df["champion_today_score"] = final_df[best_profile]
-
-    # 按今日平均分排序
-    final_df = final_df.sort_values("today_avg", ascending=False).reset_index(drop=True)
-    final_df.insert(0, "rank", range(1, len(final_df) + 1))
-
-    # ── 打印 ──────────────────────────────────────────────────────────────────
-    print_summary(final_df, wf_df, profile_ids)
-
-    # ── 保存 ──────────────────────────────────────────────────────────────────
+    # ── 保存 ─────────────────────────────────────────────────────────────────
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    final_df.to_csv(out_path, index=False, encoding="utf-8-sig")
+    df.to_csv(out_path, index=False, encoding="utf-8-sig")
     print(f"\n结果已保存：{out_path}")
-
-    if wf_df is not None:
-        wf_out = out_path.with_name(out_path.stem + "_wf_stability.csv")
-        wf_df.reset_index().to_csv(wf_out, index=False, encoding="utf-8-sig")
-        print(f"稳定性报告：{wf_out}")
 
 
 if __name__ == "__main__":

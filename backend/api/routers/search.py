@@ -45,7 +45,7 @@ def _get_pool_svc() -> TemporalPoolService:
 
 class TemporalPoolSearchRequest(BaseModel):
     codes: list[str] = Field(..., description="股票代码列表")
-    search_space_id: str = Field(default="default_search_space", description="搜索空间 ID")
+    search_space_id: str = Field(default="temporal_default", description="搜索空间 ID")
     start_date: str = Field(..., description="回测开始日期 YYYY-MM-DD")
     end_date: str = Field(..., description="回测结束日期 YYYY-MM-DD")
     max_workers: int = Field(default=1, ge=1, le=16)
@@ -53,14 +53,14 @@ class TemporalPoolSearchRequest(BaseModel):
 
 class CrossSectionalSearchRequest(BaseModel):
     universe: str = Field(..., description="截面 universe 名称")
-    search_space_id: str = Field(default="default_search_space", description="搜索空间 ID")
+    search_space_id: str = Field(default="cross_sectional_default", description="搜索空间 ID")
     start_date: str = Field(..., description="回测开始日期 YYYY-MM-DD")
     end_date: str = Field(..., description="回测结束日期 YYYY-MM-DD")
 
 
 class StockSearchRequest(BaseModel):
     code: str = Field(..., description="股票代码")
-    search_space_id: str = Field(default="default_search_space", description="搜索空间 ID")
+    search_space_id: str = Field(default="temporal_default", description="搜索空间 ID")
     start_date: str = Field(..., description="回测开始日期 YYYY-MM-DD")
     end_date: str = Field(..., description="回测结束日期 YYYY-MM-DD")
 
