@@ -970,6 +970,7 @@ class FactorService:
             description=description,
             source="user",
             category=category,
+            formula_type=formula_type,
             is_active=1,
         )
         result = repo.create(factor)

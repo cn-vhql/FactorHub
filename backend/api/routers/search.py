@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -104,7 +104,7 @@ def _run_champion_job(task_id: str, job_type: str, request: Any, svc: ChampionSt
             "task_id": task_id,
             "status": status,
             "message": message,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
             "champion": champion,
             "error": error,
         }
@@ -147,7 +147,7 @@ def _create_job(task_id: str) -> dict:
     """创建初始任务状态文件，返回状态字典。"""
     task_dir = _JOBS_DIR / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     payload = {
         "task_id": task_id,
         "status": "pending",
@@ -302,12 +302,15 @@ async def list_search_spaces(
     registry: FactorProfileRegistryService = Depends(_get_profile_registry),
 ):
     """列出所有可用的 search space 配置。"""
-    # load_search_space 需要 space_id；此处返回已知 space 列表
+    # 优先从 settings 读取，回退到配置文件中已知的默认 ID
     try:
         from backend.core.settings import settings
-        space_ids: list[str] = getattr(settings, "SEARCH_SPACE_IDS", ["default_search_space"])
+        space_ids: list[str] = getattr(settings, "SEARCH_SPACE_IDS", [])
     except Exception:
-        space_ids = ["default_search_space"]
+        space_ids = []
+
+    if not space_ids:
+        space_ids = ["temporal_default", "cross_sectional_default"]
 
     spaces = []
     for sid in space_ids:

@@ -12,16 +12,36 @@ from hypothesis import strategies as st
 
 # ---------------------------------------------------------------------------
 # 在导入 TemporalScoringService 之前，mock 掉 talib 和数据库依赖
+# 注意：只在 talib 尚未被真实模块加载时才注入 mock，且在 teardown 时恢复，
+# 避免污染同一进程中后续测试模块的 sys.modules 状态。
 # ---------------------------------------------------------------------------
+_talib_real = sys.modules.get("talib")  # 记录原始值（None 表示未加载）
 _talib_mock = MagicMock()
 _talib_mock.EMA = MagicMock(return_value=np.zeros(100))
-sys.modules.setdefault("talib", _talib_mock)
+if _talib_real is None:
+    sys.modules["talib"] = _talib_mock
 
-# 确保 backend.services.factor_service 使用 mock talib
-if "backend.services.factor_service" in sys.modules:
-    del sys.modules["backend.services.factor_service"]
-if "backend.services.temporal_scoring_service" in sys.modules:
-    del sys.modules["backend.services.temporal_scoring_service"]
+# 强制重新导入，确保本模块使用 mock talib
+for _mod in ("backend.services.factor_service", "backend.services.temporal_scoring_service"):
+    sys.modules.pop(_mod, None)
+
+
+def pytest_configure(config):
+    """注册 finalizer，在整个 session 结束前恢复 sys.modules["talib"]。"""
+    pass  # 恢复逻辑放在 autouse fixture 中
+
+
+import pytest as _pytest  # noqa: E402 (already imported above via hypothesis)
+
+
+@_pytest.fixture(autouse=True, scope="module")
+def _restore_talib_mock():
+    """模块级 fixture：测试结束后将 sys.modules["talib"] 恢复到进入前的状态。"""
+    yield
+    if _talib_real is None:
+        sys.modules.pop("talib", None)
+    else:
+        sys.modules["talib"] = _talib_real
 
 from backend.services.temporal_scoring_service import TemporalScoringService  # noqa: E402
 

@@ -80,11 +80,15 @@ async def sync_score(request: ScoringRequest, background_tasks: BackgroundTasks)
     if len(request.codes) > _sync_threshold():
         # 超限自动转异步，避免阻塞 worker
         try:
-            task_id = task_manager.create_task(request.codes, trade_date, request.profile_id)
+            task_id = task_manager.create_task(
+                request.codes, trade_date, request.profile_id,
+                per_stock_profiles=request.per_stock_profiles,
+            )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
         background_tasks.add_task(
-            task_manager.run_task, task_id, request.codes, trade_date, request.profile_id
+            task_manager.run_task, task_id, request.codes, trade_date, request.profile_id,
+            per_stock_profiles=request.per_stock_profiles,
         )
         from fastapi.responses import JSONResponse
         return JSONResponse(
@@ -116,11 +120,15 @@ async def async_score(request: ScoringRequest, background_tasks: BackgroundTasks
     """异步任务创建（需求 2.1-2.5）"""
     trade_date = _resolve_trade_date(request.trade_date)
     try:
-        task_id = task_manager.create_task(request.codes, trade_date, request.profile_id)
+        task_id = task_manager.create_task(
+            request.codes, trade_date, request.profile_id,
+            per_stock_profiles=request.per_stock_profiles,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     background_tasks.add_task(
-        task_manager.run_task, task_id, request.codes, trade_date, request.profile_id
+        task_manager.run_task, task_id, request.codes, trade_date, request.profile_id,
+        per_stock_profiles=request.per_stock_profiles,
     )
     return AsyncJobResponse(task_id=task_id, status="pending")
 
