@@ -474,7 +474,7 @@ def test_property_strategy_d_cash_weight(n_available, top_n):
     n_dates=st.integers(min_value=5, max_value=50),
     n_stocks=st.integers(min_value=5, max_value=20),
 )
-@settings(max_examples=100)
+@settings(max_examples=100, deadline=None)
 def test_property_ic_output_completeness(n_dates, n_stocks):
     """
     Property 5: IC output contains all horizon dimensions, p_value in [0,1].

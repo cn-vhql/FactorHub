@@ -112,6 +112,114 @@
         "score_threshold": 72,
         "percentile_window": 252
       }
+    },
+    {
+      "id": "breakout_v1",
+      "mode": "temporal_pool",
+      "description": "突破模板 - 价格突破近期高点 + 量能放大确认",
+      "source": "builtin",
+      "version": "1.0",
+      "factors": [
+        {"name": "distance_to_high_20","direction": -1, "weight": 0.35, "role": "signal"},
+        {"name": "price_range_ratio_20","direction": 1, "weight": 0.25, "role": "signal"},
+        {"name": "momentum_20",         "direction": 1, "weight": 0.20, "role": "signal"},
+        {"name": "volume_ma_ratio",     "direction": 1, "weight": 0.20, "role": "signal"},
+        {"name": "atr_norm",            "direction": -1,"weight": 0.0,  "role": "risk_filter", "threshold": 0.85}
+      ],
+      "params": {
+        "rebalance": "W-FRI",
+        "hold_days": 5,
+        "top_n": 10,
+        "score_threshold": 68,
+        "percentile_window": 252
+      }
+    },
+    {
+      "id": "macd_momentum_v1",
+      "mode": "temporal_pool",
+      "description": "MACD 动量模板 - MACD 金叉 + 趋势加速",
+      "source": "builtin",
+      "version": "1.0",
+      "factors": [
+        {"name": "macd_hist",             "direction": 1, "weight": 0.30, "role": "signal"},
+        {"name": "macd_line",             "direction": 1, "weight": 0.20, "role": "signal"},
+        {"name": "momentum_acceleration", "direction": 1, "weight": 0.25, "role": "signal"},
+        {"name": "price_vs_sma20",        "direction": 1, "weight": 0.25, "role": "signal"},
+        {"name": "atr_norm",              "direction": -1,"weight": 0.0,  "role": "risk_filter", "threshold": 0.80},
+        {"name": "volume_ma_ratio",       "direction": 1, "weight": 0.0,  "role": "risk_filter", "threshold": 0.30}
+      ],
+      "params": {
+        "rebalance": "W-FRI",
+        "hold_days": 5,
+        "top_n": 10,
+        "score_threshold": 65,
+        "percentile_window": 252
+      }
+    },
+    {
+      "id": "vol_contraction_v1",
+      "mode": "temporal_pool",
+      "description": "波动率收缩模板 - 布林带收窄后蓄势待发",
+      "source": "builtin",
+      "version": "1.0",
+      "factors": [
+        {"name": "bollinger_bandwidth",  "direction": -1, "weight": 0.35, "role": "signal"},
+        {"name": "price_vs_sma20",       "direction": 1,  "weight": 0.25, "role": "signal"},
+        {"name": "price_momentum_strength","direction": 1,"weight": 0.25, "role": "signal"},
+        {"name": "volume_ma_ratio",      "direction": 1,  "weight": 0.15, "role": "signal"},
+        {"name": "atr_norm",             "direction": -1, "weight": 0.0,  "role": "risk_filter", "threshold": 0.50}
+      ],
+      "params": {
+        "rebalance": "2W-FRI",
+        "hold_days": 10,
+        "top_n": 10,
+        "score_threshold": 65,
+        "percentile_window": 252
+      }
+    },
+    {
+      "id": "multi_ma_align_v1",
+      "mode": "temporal_pool",
+      "description": "多均线多头排列模板 - 5/10/20/60 均线多头 + 量能",
+      "source": "builtin",
+      "version": "1.0",
+      "factors": [
+        {"name": "ma_multi_align",   "direction": 1,  "weight": 0.35, "role": "signal"},
+        {"name": "sma20_vs_sma60",   "direction": 1,  "weight": 0.25, "role": "signal"},
+        {"name": "ma_bias_5_20",     "direction": 1,  "weight": 0.20, "role": "signal"},
+        {"name": "force_index_ma",   "direction": 1,  "weight": 0.20, "role": "signal"},
+        {"name": "atr_norm",         "direction": -1, "weight": 0.0,  "role": "risk_filter", "threshold": 0.80},
+        {"name": "volume_ma_ratio",  "direction": 1,  "weight": 0.0,  "role": "risk_filter", "threshold": 0.25}
+      ],
+      "params": {
+        "rebalance": "2W-FRI",
+        "hold_days": 10,
+        "top_n": 10,
+        "score_threshold": 70,
+        "percentile_window": 252
+      }
+    },
+    {
+      "id": "short_reversal_v1",
+      "mode": "temporal_pool",
+      "description": "短周期反转模板 - 3-5 日超跌反弹",
+      "source": "builtin",
+      "version": "1.0",
+      "factors": [
+        {"name": "reversal_5",        "direction": 1,  "weight": 0.35, "role": "signal"},
+        {"name": "reversal_10",       "direction": 1,  "weight": 0.25, "role": "signal"},
+        {"name": "rsi_14",            "direction": -1, "weight": 0.25, "role": "signal"},
+        {"name": "distance_to_low_20","direction": -1, "weight": 0.15, "role": "signal"},
+        {"name": "atr_norm",          "direction": -1, "weight": 0.0,  "role": "risk_filter", "threshold": 0.90},
+        {"name": "volume_ma_ratio",   "direction": 1,  "weight": 0.0,  "role": "risk_filter", "threshold": 0.15}
+      ],
+      "params": {
+        "rebalance": "W-FRI",
+        "hold_days": 5,
+        "top_n": 10,
+        "score_threshold": 60,
+        "percentile_window": 120
+      }
     }
   ]
 }

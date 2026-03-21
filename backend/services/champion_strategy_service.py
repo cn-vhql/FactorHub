@@ -278,6 +278,7 @@ class ChampionStrategyService:
                         codes=eval_codes,
                         start_date=start_date,
                         end_date=end_date,
+                        max_workers=max_workers,
                     )
                 evaluated.append({**candidate, **result})
                 logger.info(

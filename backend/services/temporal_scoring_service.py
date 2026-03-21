@@ -724,10 +724,16 @@ class TaskManager:
     # 任务创建
     # ------------------------------------------------------------------
 
-    def create_task(self, codes: list[str], trade_date: str) -> str:
+    def create_task(
+        self,
+        codes: list[str],
+        trade_date: str,
+        profile_id: str | None = None,
+    ) -> str:
         """
         创建任务目录结构，写入 input_codes.csv 和初始 status.json。
         返回 task_id（UUID）。
+        profile_id 若提供则写入 status.json，供 run_task 使用。
         """
         task_id = str(uuid.uuid4())
         task_dir = self._task_dir(task_id)
@@ -744,6 +750,7 @@ class TaskManager:
             "task_id": task_id,
             "status": "pending",
             "trade_date": trade_date,
+            "profile_id": profile_id,
             "total": len(codes),
             "processed": 0,
             "success_count": 0,
@@ -790,7 +797,7 @@ class TaskManager:
             with open(scores_path, "a", encoding="utf-8", newline="") as f:
                 if write_header:
                     f.write("date,code,score\n")
-                f.write(f"{result['date']},{result['code']},{result['score']:.1f}\n")
+                f.write(f"{result['date']},\"{result['code']}\",{result['score']:.1f}\n")
 
             # daily_scores_detail.csv
             write_header_detail = not detail_path.exists()
@@ -806,7 +813,7 @@ class TaskManager:
                     str(result["pcts"].get(n, "")) for n in FACTOR_NAMES
                 )
                 f.write(
-                    f"{result['date']},{result['code']},{result['score']:.1f},"
+                    f"{result['date']},\"{result['code']}\",{result['score']:.1f},"
                     f"{factor_vals},{pct_vals}\n"
                 )
 
@@ -827,21 +834,38 @@ class TaskManager:
     # 后台任务执行
     # ------------------------------------------------------------------
 
-    def run_task(self, task_id: str, codes: list[str], trade_date: str) -> None:
-        """后台执行任务（由 FastAPI BackgroundTasks 调用）"""
+    def run_task(
+        self,
+        task_id: str,
+        codes: list[str],
+        trade_date: str,
+        profile_id: str | None = None,
+    ) -> None:
+        """后台执行任务（由 FastAPI BackgroundTasks 调用）。
+
+        profile_id 优先从参数取，其次从 status.json 读取，
+        确保异步路径和自动升级路径都能正确带上 profile_id。
+        """
         try:
             # 更新状态为 running
             status = self.get_status(task_id)
+            # 若调用方未传 profile_id，从已持久化的 status 中读取
+            effective_profile_id = profile_id or status.get("profile_id")
             status["status"] = "running"
             status["started_at"] = datetime.now(timezone.utc).isoformat()
             status["updated_at"] = datetime.now(timezone.utc).isoformat()
             self._write_status(task_id, status)
 
+            def _score_one(code: str) -> dict:
+                if effective_profile_id:
+                    return self.scoring_service.score_one_stock_with_profile(
+                        code, trade_date, effective_profile_id
+                    )
+                return self.scoring_service.score_one_stock(code, trade_date)
+
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 future_to_code = {
-                    executor.submit(
-                        self.scoring_service.score_one_stock, code, trade_date
-                    ): code
+                    executor.submit(_score_one, code): code
                     for code in codes
                 }
 
@@ -907,7 +931,7 @@ class TaskManager:
         )
         if not csv_path.exists():
             return []
-        df = pd.read_csv(csv_path)
+        df = pd.read_csv(csv_path, dtype={"code": str})
         return df.to_dict(orient="records")
 
 

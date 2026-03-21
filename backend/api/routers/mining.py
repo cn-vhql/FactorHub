@@ -2,7 +2,7 @@
 因子挖掘API路由
 """
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 import sys
 import asyncio
@@ -30,11 +30,65 @@ class GeneticMiningRequest(BaseModel):
     ic_threshold: float = 0.03
 
 
+class RecentValuableFactorRequest(BaseModel):
+    """最近阶段高价值因子挖掘请求"""
+    stock_codes: List[str]
+    end_date: str
+    eval_days: int = Field(default=90, ge=10, le=730,
+                           description="最近评估窗口（自然日），范围 [10, 730]")
+    lookback_days: int = Field(default=240, ge=30, le=1825,
+                               description="因子预热窗口（自然日），范围 [30, 1825]")
+    horizons: List[int] = Field(default_factory=lambda: [1, 5, 10],
+                                description="未来收益周期列表，每个值须 ≥ 1")
+    top_k: int = Field(default=20, ge=1, le=200,
+                       description="返回 TopK 因子，范围 [1, 200]")
+    min_samples: int = Field(default=25, ge=5, le=500,
+                             description="计算相关性最小样本数，范围 [5, 500]")
+    correlation_threshold: float = Field(default=0.85, ge=0.0, le=1.0,
+                                         description="因子去重相关阈值，范围 [0.0, 1.0]")
+
+
 # ========== 任务存储（内存） ==========
 mining_tasks = {}
 
 
 # ========== API端点 ==========
+
+@router.post("/recent-valuable")
+async def mine_recent_valuable_factors(request: RecentValuableFactorRequest):
+    """
+    从现有因子库自动挖掘最近窗口内高价值因子。
+
+    输出包含全局 Top 因子（含相关性去重）和单票当前走势下 Top 因子。
+    """
+    try:
+        from backend.services.recent_factor_mining_service import recent_factor_mining_service
+
+        if not request.stock_codes:
+            raise HTTPException(status_code=400, detail="stock_codes 不能为空")
+
+        result = recent_factor_mining_service.mine_recent_valuable_factors(
+            stock_codes=request.stock_codes,
+            end_date=request.end_date,
+            eval_days=request.eval_days,
+            lookback_days=request.lookback_days,
+            horizons=request.horizons,
+            top_k=request.top_k,
+            min_samples=request.min_samples,
+            correlation_threshold=request.correlation_threshold,
+        )
+
+        return {
+            "success": True,
+            "data": result,
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"最近因子挖掘失败: {exc}")
+
 
 @router.post("/genetic")
 async def start_genetic_mining(request: GeneticMiningRequest, background_tasks: BackgroundTasks):

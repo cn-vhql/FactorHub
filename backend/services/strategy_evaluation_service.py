@@ -405,6 +405,16 @@ class StrategyEvaluationService:
 
         window_metrics: list[dict] = []
 
+        # Short-circuit: if universe_df is empty, no windows can run
+        if universe_df is not None and universe_df.empty:
+            return {
+                "train_metrics": _empty_metrics(),
+                "valid_metrics": _empty_metrics(),
+                "test_metrics": _empty_metrics(),
+                "stability_score": 0.0,
+                "window_metrics": [],
+            }
+
         for w in windows:
             wid = w["window_id"]
             train_metrics = _empty_metrics()
