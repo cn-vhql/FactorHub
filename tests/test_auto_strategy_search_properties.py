@@ -1685,3 +1685,137 @@ def test_equal_weight_backtest_with_cash_order_independence_property12(
         f"NAV 曲线长度不一致：original={len(nav_original)}, reversed={len(nav_reversed)}"
     )
     pd.testing.assert_series_equal(nav_original, nav_reversed, check_names=False)
+
+
+# ---------------------------------------------------------------------------
+# Property 13：_load_universe_df 因子列非全 NaN 不变量
+# Validates: TASK 8 fix — cross-sectional default path computes factor columns
+# ---------------------------------------------------------------------------
+
+def test_load_universe_df_factor_columns_populated():
+    """
+    **Validates: TASK 8 fix**
+
+    Property 13：_load_universe_df 返回的 DataFrame 中，
+    请求的因子列必须存在且非全 NaN（当 DataService 返回有效 OHLCV 数据时）。
+
+    通过 mock DataService.get_multiple_stocks_data 和
+    TemporalScoringService._compute_factors 验证因子列被正确附加。
+    """
+    import pandas as pd
+    import numpy as np
+    from unittest.mock import patch, MagicMock
+    from backend.services.strategy_evaluation_service import _load_universe_df
+
+    # 构造 mock OHLCV 数据（60 个交易日，足够计算因子）
+    dates = pd.date_range("2023-01-01", periods=60, freq="B")
+    rng = np.random.default_rng(42)
+    codes = ["000001", "000002"]
+
+    def make_ohlcv(seed):
+        rng2 = np.random.default_rng(seed)
+        close = 10.0 + rng2.random(60).cumsum()
+        return pd.DataFrame(
+            {
+                "open": close * 0.99,
+                "high": close * 1.01,
+                "low": close * 0.98,
+                "close": close,
+                "volume": rng2.integers(1_000_000, 5_000_000, size=60).astype(float),
+            },
+            index=dates,
+        )
+
+    mock_price_data = {code: make_ohlcv(i) for i, code in enumerate(codes)}
+
+    # mock _compute_factors 返回两个因子的 Series
+    def mock_compute_factors(df):
+        return {
+            "price_vs_sma20": df["close"] / df["close"].rolling(20).mean(),
+            "momentum_20": df["close"] / df["close"].shift(20) - 1,
+        }
+
+    with patch(
+        "backend.services.data_service.data_service.get_multiple_stocks_data",
+        return_value=mock_price_data,
+    ), patch(
+        "backend.services.temporal_scoring_service.temporal_scoring_service._compute_factors",
+        side_effect=mock_compute_factors,
+    ):
+        result = _load_universe_df(
+            universe="test_universe",
+            codes=codes,
+            start_date="2023-01-01",
+            end_date="2023-03-31",
+            factor_names=["price_vs_sma20", "momentum_20"],
+        )
+
+    # 基本结构检查
+    assert not result.empty, "_load_universe_df 返回空 DataFrame"
+    assert "stock_code" in result.columns
+    assert "close" in result.columns
+    assert "date" in result.columns
+
+    # 因子列存在
+    assert "price_vs_sma20" in result.columns, "缺少 price_vs_sma20 列"
+    assert "momentum_20" in result.columns, "缺少 momentum_20 列"
+
+    # 因子列非全 NaN（至少有部分有效值）
+    for fn in ["price_vs_sma20", "momentum_20"]:
+        non_nan_count = result[fn].notna().sum()
+        assert non_nan_count > 0, (
+            f"因子列 '{fn}' 全为 NaN，_load_universe_df 未正确计算因子"
+        )
+
+    # 所有请求的股票代码都在结果中
+    result_codes = set(result["stock_code"].unique())
+    for code in codes:
+        assert code in result_codes, f"股票 {code} 不在结果中"
+
+
+def test_load_universe_df_unknown_factor_returns_nan_column():
+    """
+    **Validates: TASK 8 fix — 未知因子名优雅降级**
+
+    请求一个不在内置因子列表中的因子名时，
+    _load_universe_df 应返回该列全为 NaN（而非抛出异常）。
+    """
+    import pandas as pd
+    import numpy as np
+    from unittest.mock import patch
+    from backend.services.strategy_evaluation_service import _load_universe_df
+
+    dates = pd.date_range("2023-01-01", periods=60, freq="B")
+    rng = np.random.default_rng(0)
+    close = 10.0 + rng.random(60).cumsum()
+    mock_ohlcv = pd.DataFrame(
+        {
+            "open": close * 0.99,
+            "high": close * 1.01,
+            "low": close * 0.98,
+            "close": close,
+            "volume": rng.integers(1_000_000, 5_000_000, size=60).astype(float),
+        },
+        index=dates,
+    )
+
+    with patch(
+        "backend.services.data_service.data_service.get_multiple_stocks_data",
+        return_value={"000001": mock_ohlcv},
+    ), patch(
+        "backend.services.temporal_scoring_service.temporal_scoring_service._compute_factors",
+        return_value={"price_vs_sma20": mock_ohlcv["close"] / mock_ohlcv["close"].rolling(20).mean()},
+    ):
+        result = _load_universe_df(
+            universe="test_universe",
+            codes=["000001"],
+            start_date="2023-01-01",
+            end_date="2023-03-31",
+            factor_names=["nonexistent_factor_xyz"],
+        )
+
+    assert "nonexistent_factor_xyz" in result.columns, "未知因子列应存在（值为 NaN）"
+    # 全为 NaN 是预期行为
+    assert result["nonexistent_factor_xyz"].isna().all(), (
+        "未知因子列应全为 NaN"
+    )

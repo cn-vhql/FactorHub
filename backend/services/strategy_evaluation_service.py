@@ -212,6 +212,7 @@ class StrategyEvaluationService:
         valid_months: int = 3,
         test_months: int = 3,
         step_months: int = 3,
+        max_workers: int = 1,
     ) -> dict:
         """时序池候选策略 walk-forward 评价。
 
@@ -263,6 +264,7 @@ class StrategyEvaluationService:
                     top_n=top_n,
                     score_threshold=score_threshold,
                     rebalance=rebalance,
+                    max_workers=max_workers,
                 )
             except Exception as exc:
                 logger.warning(f"窗口 {wid} 训练期回测失败，已跳过: {exc}")
@@ -277,6 +279,7 @@ class StrategyEvaluationService:
                     top_n=top_n,
                     score_threshold=score_threshold,
                     rebalance=rebalance,
+                    max_workers=max_workers,
                 )
             except Exception as exc:
                 logger.warning(f"窗口 {wid} 验证期回测失败，已跳过: {exc}")
@@ -291,6 +294,7 @@ class StrategyEvaluationService:
                     top_n=top_n,
                     score_threshold=score_threshold,
                     rebalance=rebalance,
+                    max_workers=max_workers,
                 )
             except Exception as exc:
                 logger.warning(f"窗口 {wid} 测试期回测失败，已跳过: {exc}")
@@ -348,10 +352,13 @@ class StrategyEvaluationService:
         """截面候选策略 walk-forward 评价。
 
         复用 vectorbt_backtest_service.cross_sectional_backtest_composite 执行回测。
+        universe_df 优先从 candidate['universe_df'] 取；若未提供则通过 DataService
+        按 universe 名称加载股票列表并拉取价格+因子数据。
 
         Args:
-            candidate: 候选策略配置字典
-            universe: universe 名称（当前实现中作为标识，实际数据需外部提供）
+            candidate: 候选策略配置字典；可含 'universe_df'（pd.DataFrame）或
+                       'universe_codes'（list[str]）以提供真实数据
+            universe: universe 名称，用于从 DataService 加载数据（当 candidate 未提供数据时）
             start_date: 整体起始日期
             end_date: 整体结束日期
             train_months: 训练期月数
@@ -385,6 +392,17 @@ class StrategyEvaluationService:
                 f"时间范围 {start_date} ~ {end_date} 无法生成完整的 walk-forward 窗口。"
             )
 
+        # 预加载全量 universe_df（整个回测区间），各窗口按日期切片
+        universe_df: "pd.DataFrame | None" = candidate.get("universe_df")
+        if universe_df is None:
+            universe_df = _load_universe_df(
+                universe=universe,
+                codes=candidate.get("universe_codes"),
+                start_date=start_date,
+                end_date=end_date,
+                factor_names=list(factor_weights.keys()),
+            )
+
         window_metrics: list[dict] = []
 
         for w in windows:
@@ -399,25 +417,47 @@ class StrategyEvaluationService:
                 ("test", w["test_start"], w["test_end"], "test_metrics"),
             ]:
                 try:
-                    result = vbt_svc.cross_sectional_backtest_composite(
-                        df=_build_universe_df(universe, period_start, period_end),
-                        factor_weights=factor_weights,
-                        top_percentile=top_percentile,
-                    )
-                    metrics = {
-                        "annual_return": result.get("annual_return", float("nan")),
-                        "sharpe": result.get("sharpe", float("nan")),
-                        "max_drawdown": result.get("max_drawdown", float("nan")),
-                        "win_rate": float("nan"),
-                        "volatility": result.get("volatility", float("nan")),
-                        "total_return": result.get("total_return", float("nan")),
-                    }
-                    if store_key == "train_metrics":
-                        train_metrics = metrics
-                    elif store_key == "valid_metrics":
-                        valid_metrics = metrics
+                    import pandas as pd
+                    if universe_df is not None and not universe_df.empty:
+                        date_col = "date" if "date" in universe_df.columns else universe_df.index.name
+                        if date_col and date_col in universe_df.columns:
+                            mask = (
+                                (universe_df[date_col] >= pd.Timestamp(period_start))
+                                & (universe_df[date_col] <= pd.Timestamp(period_end))
+                            )
+                            period_df = universe_df[mask].copy()
+                        else:
+                            period_df = universe_df.loc[
+                                pd.Timestamp(period_start):pd.Timestamp(period_end)
+                            ].copy()
                     else:
-                        test_metrics = metrics
+                        period_df = pd.DataFrame(columns=["date", "stock_code", "close"])
+
+                    if period_df.empty:
+                        logger.warning(
+                            f"窗口 {wid} {period} 期 universe_df 为空 "
+                            f"({period_start} ~ {period_end})，跳过"
+                        )
+                    else:
+                        result = vbt_svc.cross_sectional_backtest_composite(
+                            df=period_df,
+                            factor_weights=factor_weights,
+                            top_percentile=top_percentile,
+                        )
+                        metrics = {
+                            "annual_return": result.get("annual_return", float("nan")),
+                            "sharpe": result.get("sharpe", float("nan")),
+                            "max_drawdown": result.get("max_drawdown", float("nan")),
+                            "win_rate": float("nan"),
+                            "volatility": result.get("volatility", float("nan")),
+                            "total_return": result.get("total_return", float("nan")),
+                        }
+                        if store_key == "train_metrics":
+                            train_metrics = metrics
+                        elif store_key == "valid_metrics":
+                            valid_metrics = metrics
+                        else:
+                            test_metrics = metrics
                 except Exception as exc:
                     logger.warning(f"窗口 {wid} {period} 期截面回测失败，已跳过: {exc}")
 
@@ -492,17 +532,112 @@ def _aggregate_metrics(metrics_list: list[dict]) -> dict:
     return result
 
 
-def _build_universe_df(universe: str, start_date: str, end_date: str):
+def _load_universe_df(
+    universe: str,
+    codes: list[str] | None,
+    start_date: str,
+    end_date: str,
+    factor_names: list[str],
+) -> "pd.DataFrame":
     """
-    为截面回测构建 DataFrame 占位符。
-    实际使用时应由调用方传入真实数据；此处返回空 DataFrame，
-    使 cross_sectional_backtest_composite 在无数据时优雅失败。
+    从 DataService 加载截面回测所需的 DataFrame，并计算所需因子列。
+
+    列：date, stock_code, close, [factor_names...]
+
+    优先使用 codes 参数；若未提供则尝试从 universe 名称解析股票列表
+    （当前仅支持 CSV 路径或已知 universe 标识，未知时返回空 DataFrame）。
+
+    因子列通过 TemporalScoringService._compute_factors() 计算，
+    支持 8 个内置因子；未知因子名会记录警告并跳过。
     """
     import pandas as pd
+    from backend.services.data_service import data_service
 
+    if not codes:
+        # 尝试把 universe 当作 CSV 路径
+        from pathlib import Path
+        p = Path(universe)
+        if p.exists() and p.suffix == ".csv":
+            try:
+                df = pd.read_csv(p)
+                if "code" in df.columns:
+                    codes = df["code"].astype(str).str.strip().tolist()
+            except Exception as exc:
+                logger.warning(f"_load_universe_df: 无法从 {universe} 读取 codes: {exc}")
+
+    if not codes:
+        logger.warning(
+            f"_load_universe_df: universe='{universe}' 无法解析股票列表，"
+            "截面回测将返回空结果。请通过 candidate['universe_codes'] 或 "
+            "candidate['universe_df'] 提供数据。"
+        )
+        return pd.DataFrame(columns=["date", "stock_code", "close"])
+
+    # 延迟导入，避免循环依赖
+    from backend.services.temporal_scoring_service import temporal_scoring_service as _tss
+
+    # 拉取数据时往前多取 lookback，确保因子计算有足够历史
+    from datetime import datetime, timedelta
+    lookback_days = getattr(_tss, "lookback_days", 372)
+    fetch_start = (
+        datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=lookback_days)
+    ).strftime("%Y-%m-%d")
+
+    price_data = data_service.get_multiple_stocks_data(codes, fetch_start, end_date)
+
+    frames = []
+    for code, ohlcv_df in price_data.items():
+        if ohlcv_df is None or ohlcv_df.empty:
+            continue
+
+        # 计算所有 8 个内置因子
+        try:
+            all_factors = _tss._compute_factors(ohlcv_df)
+        except Exception as exc:
+            logger.warning(f"_load_universe_df: 股票 {code} 因子计算失败，跳过: {exc}")
+            continue
+
+        row = ohlcv_df[["close"]].copy()
+        row["stock_code"] = code
+        row.index.name = "date"
+        row = row.reset_index()
+
+        # 附加请求的因子列
+        for fn in factor_names:
+            if fn in all_factors:
+                factor_series = all_factors[fn]
+                # 对齐索引后赋值
+                row[fn] = factor_series.reindex(
+                    pd.to_datetime(row["date"])
+                ).values
+            else:
+                logger.warning(
+                    f"_load_universe_df: 因子 '{fn}' 不在内置因子列表中，"
+                    f"股票 {code} 该列将为 NaN"
+                )
+                row[fn] = float("nan")
+
+        frames.append(row)
+
+    if not frames:
+        return pd.DataFrame(columns=["date", "stock_code", "close"])
+
+    result = pd.concat(frames, ignore_index=True)
+    result["date"] = pd.to_datetime(result["date"])
+
+    # 裁剪到请求的日期范围（去掉 lookback 预热段）
+    result = result[
+        (result["date"] >= pd.Timestamp(start_date))
+        & (result["date"] <= pd.Timestamp(end_date))
+    ].reset_index(drop=True)
+
+    return result
+
+
+def _build_universe_df(universe: str, start_date: str, end_date: str):
+    """已废弃占位符，保留以兼容旧调用。"""
+    import pandas as pd
     logger.warning(
-        f"_build_universe_df: universe='{universe}' 未提供真实数据，"
-        "截面回测将返回空结果。请在调用 evaluate_cross_sectional_candidate 前"
-        "通过 candidate['universe_df'] 传入数据。"
+        f"_build_universe_df: universe='{universe}' 已废弃，请改用 _load_universe_df。"
     )
     return pd.DataFrame(columns=["date", "stock_code", "close"])
