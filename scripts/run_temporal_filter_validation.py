@@ -3,7 +3,7 @@ CLI script for the temporal filter validation workflow.
 
 Usage:
     python scripts/run_temporal_filter_validation.py \
-        --pool-csv tests/pool100.csv \
+        --pool-csv scripts/data/pool100.csv \
         --start-date 2024-01-01 \
         --end-date 2026-03-20
 """
@@ -19,9 +19,9 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Run temporal filter validation workflow"
     )
-    parser.add_argument("--pool-csv", required=True, help="Path to stock pool CSV")
-    parser.add_argument("--start-date", required=True, help="Start date YYYY-MM-DD")
-    parser.add_argument("--end-date", required=True, help="End date YYYY-MM-DD")
+    parser.add_argument("--pool-csv", default="scripts/data/pool100.csv", help="Path to stock pool CSV")
+    parser.add_argument("--start-date", default="2024-01-01", help="Start date YYYY-MM-DD")
+    parser.add_argument("--end-date", default="2026-03-21", help="End date YYYY-MM-DD")
     parser.add_argument("--top-n", type=int, default=10, help="Top N stocks to select")
     parser.add_argument(
         "--score-threshold",
@@ -83,6 +83,17 @@ def main():
         forward_returns = validation_service.build_forward_returns(
             codes, args.start_date, args.end_date, horizons=horizons_tuple
         )
+
+        # Short-circuit on coverage-gate failure
+        if isinstance(forward_returns, dict) and forward_returns.get("result_status") == "invalid_run":
+            reason_codes = forward_returns.get("reason_codes", [])
+            coverage = forward_returns.get("code_coverage", 0.0)
+            print(
+                f"invalid_run: 数据覆盖率门禁触发，reason_codes={reason_codes}，"
+                f"code_coverage={coverage:.2%}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
         # Step 6: Build research panel
         research_panel = validation_service.build_research_panel(

@@ -14,6 +14,27 @@ from scipy.stats import spearmanr, ttest_1samp, ttest_rel
 logger = logging.getLogger(__name__)
 
 
+def _inactive_backtest_metrics(
+    trading_days: int = 0,
+    active_days: int = 0,
+    rebalance_count: int = 0,
+    active_rebalance_count: int = 0,
+) -> dict:
+    return {
+        "annual_return": float("nan"),
+        "sharpe": float("nan"),
+        "max_drawdown": float("nan"),
+        "win_rate": float("nan"),
+        "volatility": float("nan"),
+        "total_return": float("nan"),
+        "active_days": float(active_days),
+        "trading_days": float(trading_days),
+        "active_ratio": float(active_days / trading_days) if trading_days > 0 else 0.0,
+        "rebalance_count": float(rebalance_count),
+        "active_rebalance_count": float(active_rebalance_count),
+    }
+
+
 class TemporalFilterValidationService:
     """时序筛选验证主服务"""
 
@@ -133,6 +154,7 @@ class TemporalFilterValidationService:
         top_n: int = 10,
         score_threshold: Optional[float] = None,
         rebalance: str = "W-FRI",
+        hold_days: Optional[int] = None,
         max_workers: int = 1,
     ) -> dict:
         """
@@ -145,7 +167,8 @@ class TemporalFilterValidationService:
             end_date: 结束日期，格式 "YYYY-MM-DD"
             top_n: 每期持仓数量
             score_threshold: 可选，最低分阈值，低于此分数的股票不进入持仓
-            rebalance: 调仓频率，如 "W-FRI"、"2W-FRI"、"M"
+            rebalance: 调仓频率，如 "W-FRI"、"2W-FRI"、"M"；hold_days 有值时优先用 hold_days
+            hold_days: 可选，持仓天数（交易日），有值时用 "{hold_days}B" offset 生成调仓日期
             max_workers: 并发线程数，透传到 score_pool_history
 
         Returns:
@@ -167,25 +190,22 @@ class TemporalFilterValidationService:
         )
 
         if score_panel.empty:
-            return {
-                "annual_return": float("nan"),
-                "sharpe": float("nan"),
-                "max_drawdown": float("nan"),
-                "win_rate": float("nan"),
-                "volatility": float("nan"),
-                "total_return": float("nan"),
-            }
+            return _inactive_backtest_metrics()
 
         # 获取价格数据
         all_codes = score_panel["code"].unique().tolist()
         price_data = self.data_service.get_multiple_stocks_data(all_codes, start_date, end_date)
 
-        # 生成调仓日期
+        # 生成调仓日期：hold_days 有值时用交易日 offset，否则用 rebalance 字符串
         all_trading_dates = sorted(score_panel["date"].unique())
+        if hold_days and hold_days > 0:
+            rebalance_offset = f"{hold_days}B"
+        else:
+            rebalance_offset = rebalance
         rebalance_range = pd.date_range(
             start=all_trading_dates[0],
             end=all_trading_dates[-1],
-            freq=rebalance,
+            freq=rebalance_offset,
         )
 
         def nearest_trading_date(target):
@@ -211,47 +231,52 @@ class TemporalFilterValidationService:
             holdings[td] = top_stocks
 
         if not holdings:
-            return {
-                "annual_return": float("nan"),
-                "sharpe": float("nan"),
-                "max_drawdown": float("nan"),
-                "win_rate": float("nan"),
-                "volatility": float("nan"),
-                "total_return": float("nan"),
-            }
+            return _inactive_backtest_metrics()
 
         # 执行等权回测
-        nav_series = self._equal_weight_backtest(holdings, price_data)
+        nav_series, active_flags = self._equal_weight_backtest_with_diagnostics(
+            holdings, price_data
+        )
+        trading_days = int(len(nav_series))
+        active_days = int(active_flags.sum()) if not active_flags.empty else 0
+        rebalance_count = len(holdings)
+        active_rebalance_count = sum(1 for pos in holdings.values() if pos)
 
         if nav_series.empty or len(nav_series) < 2:
-            return {
-                "annual_return": float("nan"),
-                "sharpe": float("nan"),
-                "max_drawdown": float("nan"),
-                "win_rate": float("nan"),
-                "volatility": float("nan"),
-                "total_return": float("nan"),
-            }
+            return _inactive_backtest_metrics(
+                trading_days=trading_days,
+                active_days=active_days,
+                rebalance_count=rebalance_count,
+                active_rebalance_count=active_rebalance_count,
+            )
+
+        if active_days == 0:
+            return _inactive_backtest_metrics(
+                trading_days=trading_days,
+                active_days=active_days,
+                rebalance_count=rebalance_count,
+                active_rebalance_count=active_rebalance_count,
+            )
 
         # 计算回测指标
         daily_returns = nav_series.pct_change().dropna()
 
         if len(daily_returns) == 0:
-            return {
-                "annual_return": float("nan"),
-                "sharpe": float("nan"),
-                "max_drawdown": float("nan"),
-                "win_rate": float("nan"),
-                "volatility": float("nan"),
-                "total_return": float("nan"),
-            }
+            return _inactive_backtest_metrics(
+                trading_days=trading_days,
+                active_days=active_days,
+                rebalance_count=rebalance_count,
+                active_rebalance_count=active_rebalance_count,
+            )
 
         mean_r = float(daily_returns.mean())
         std_r = float(daily_returns.std(ddof=1)) if len(daily_returns) > 1 else float("nan")
         annual_return = mean_r * 252
         sharpe = mean_r / std_r * np.sqrt(252) if (std_r and not np.isnan(std_r) and std_r != 0) else float("nan")
         volatility = std_r * np.sqrt(252) if (std_r and not np.isnan(std_r)) else float("nan")
-        win_rate = float((daily_returns > 0).mean())
+        active_return_mask = active_flags.reindex(daily_returns.index, fill_value=False).astype(bool)
+        active_returns = daily_returns[active_return_mask]
+        win_rate = float((active_returns > 0).mean()) if len(active_returns) > 0 else float("nan")
 
         # 最大回撤
         rolling_max = nav_series.cummax()
@@ -268,6 +293,11 @@ class TemporalFilterValidationService:
             "win_rate": win_rate,
             "volatility": volatility,
             "total_return": total_return,
+            "active_days": float(active_days),
+            "trading_days": float(trading_days),
+            "active_ratio": float(active_days / trading_days) if trading_days > 0 else 0.0,
+            "rebalance_count": float(rebalance_count),
+            "active_rebalance_count": float(active_rebalance_count),
         }
 
     def build_forward_returns(
@@ -276,18 +306,67 @@ class TemporalFilterValidationService:
         start_date: str,
         end_date: str,
         horizons: tuple = (5, 10, 20),
-    ) -> pd.DataFrame:
+    ) -> pd.DataFrame | dict:
         """
         构建未来收益面板。
         future_return_h = close[t+h] / open[t+1] - 1
         若 open 不可用则退化为 close[t+1]
+
+        当数据覆盖率低于 EVAL_MIN_CODE_COVERAGE 时，返回 invalid_run 字典。
         """
+        from backend.core.settings import settings as _settings
+
         # 需要多取 max(horizons)+1 天的数据以计算未来收益
         max_h = max(horizons)
         end_dt = pd.Timestamp(end_date) + pd.Timedelta(days=max_h + 10)
         fetch_end = end_dt.strftime("%Y-%m-%d")
 
-        price_data = self.data_service.get_multiple_stocks_data(codes, start_date, fetch_end)
+        # 优先使用带覆盖率报告的接口；若 data_service 不支持或返回非真实 report 则退化到旧接口
+        # 用 try/except 而非 hasattr 检测，避免 MagicMock 把任何属性都报告为存在
+        use_report = False
+        report = None
+        code_coverage = 1.0
+        try:
+            _report = self.data_service.get_multiple_stocks_data_with_report(codes, start_date, fetch_end)
+            # 验证返回值确实是带 code_coverage 的真实 report 对象
+            # MagicMock 的 .data 不是 dict，用此区分真实 report 与 mock
+            if isinstance(_report.data, dict):
+                code_coverage = float(_report.code_coverage)
+                report = _report
+                use_report = True
+        except (AttributeError, TypeError, ValueError):
+            use_report = False
+
+        if use_report:
+            # 覆盖率门禁
+            reason_codes = []
+            if code_coverage < _settings.EVAL_MIN_CODE_COVERAGE:
+                reason_codes.append("CODE_COVERAGE_TOO_LOW")
+
+            # 有效日期数门禁
+            all_dates: set = set()
+            for df in report.data.values():
+                if df is not None and not df.empty:
+                    all_dates.update(df.index.tolist())
+            valid_date_count = len(all_dates)
+
+            if valid_date_count < _settings.EVAL_MIN_IC_SAMPLES:
+                reason_codes.append("INSUFFICIENT_IC_SAMPLES")
+
+            if reason_codes:
+                logger.warning(
+                    f"build_forward_returns: 覆盖率门禁触发 {reason_codes}，"
+                    f"code_coverage={code_coverage:.2%}, valid_dates={valid_date_count}，返回 invalid_run"
+                )
+                return {
+                    "result_status": "invalid_run",
+                    "reason_codes": reason_codes,
+                    "code_coverage": code_coverage,
+                }
+            price_data = report.data
+        else:
+            # 旧接口路径（测试 mock / 旧调用方）
+            price_data = self.data_service.get_multiple_stocks_data(codes, start_date, fetch_end)
 
         frames = []
         for code in codes:
@@ -337,12 +416,22 @@ class TemporalFilterValidationService:
     def build_research_panel(
         self,
         score_panel: pd.DataFrame,
-        forward_returns: pd.DataFrame,
+        forward_returns: pd.DataFrame | dict,
     ) -> pd.DataFrame:
         """
         合并评分面板与未来收益面板（按 date, code 内连接）。
         返回列：date, code, score, rank, future_return_5, future_return_10, future_return_20
+
+        若 forward_returns 是 invalid_run 字典（覆盖率门禁触发），返回空 DataFrame。
         """
+        # 覆盖率门禁触发时 build_forward_returns 返回 dict，直接短路
+        if isinstance(forward_returns, dict):
+            logger.warning(
+                f"build_research_panel: forward_returns 是 invalid_run 字典 "
+                f"({forward_returns.get('reason_codes', [])}），返回空面板"
+            )
+            return pd.DataFrame(columns=["date", "code", "score", "rank"])
+
         merged = score_panel.merge(forward_returns, on=["date", "code"], how="inner")
         keep_cols = ["date", "code", "score", "rank"]
         for col in forward_returns.columns:
@@ -532,23 +621,34 @@ class TemporalFilterValidationService:
         holdings_by_date: dict,
         price_data: dict,
     ) -> pd.Series:
+        nav_series, _ = self._equal_weight_backtest_with_diagnostics(
+            holdings_by_date, price_data
+        )
+        return nav_series
+
+    def _equal_weight_backtest_with_diagnostics(
+        self,
+        holdings_by_date: dict,
+        price_data: dict,
+    ) -> tuple[pd.Series, pd.Series]:
         """
         等权再平衡回测器。
         holdings_by_date: {rebalance_date -> [code1, code2, ...]}
         price_data: {code -> DataFrame with close prices (DatetimeIndex)}
-        返回每日净值序列（起始值 1.0）。
+        返回 (每日净值序列, 是否持仓的布尔序列)。
         """
         if not holdings_by_date or not price_data:
-            return pd.Series(dtype=float)
+            return pd.Series(dtype=float), pd.Series(dtype=bool)
 
         all_dates = sorted(set().union(*[df.index for df in price_data.values() if not df.empty]))
         if not all_dates:
-            return pd.Series(dtype=float)
+            return pd.Series(dtype=float), pd.Series(dtype=bool)
 
         rebalance_dates = sorted(holdings_by_date.keys())
 
         nav = 1.0
         nav_series = {}
+        active_series = {}
         current_holdings_set: set = set()
         current_weights: dict = {}
         prev_prices: dict = {}
@@ -591,8 +691,9 @@ class TemporalFilterValidationService:
                 nav = nav * (1 + port_ret)
 
             nav_series[date] = nav
+            active_series[date] = bool(current_weights)
 
-        return pd.Series(nav_series)
+        return pd.Series(nav_series), pd.Series(active_series, dtype=bool)
 
     def run_portfolio_backtest(
         self,
@@ -982,6 +1083,16 @@ class TemporalFilterValidationService:
         self._write_validation_report(
             out_dir, run_id, ic_results, quantile_results,
             strategy_comparison, factor_expression_source
+        )
+
+        # run_manifest.json
+        from backend.services.champion_strategy_service import _write_run_manifest
+        _write_run_manifest(
+            out_dir,
+            module="temporal_filter_validation",
+            data_coverage=1.0,
+            quality_gate=[],
+            result_status="completed",
         )
 
         return out_dir

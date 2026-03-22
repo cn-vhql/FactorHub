@@ -28,6 +28,57 @@ class StrategySearchService:
     # 第一层：模板枚举
     # ------------------------------------------------------------------
 
+    def _inject_top_factors(
+        self,
+        base_profiles: list[dict],
+        top_factors: list[dict],
+    ) -> list[dict]:
+        """将 Stage-2/3 筛选出的 top_factors 注入到 base_profiles 的 signal 因子位置。
+
+        每个 base_profile 保留其结构（params、risk_filter 因子），
+        仅替换 signal 因子为 top_factors 中的因子（均匀分配权重）。
+        top_factors 格式：[{"factor_name": str, "recommended_direction": int, ...}, ...]
+
+        返回注入后的新 profile 列表（不修改原始 base_profiles）。
+        """
+        if not top_factors:
+            return base_profiles
+
+        injected: list[dict] = []
+        for profile in base_profiles:
+            risk_factors = [
+                f for f in profile.get("factors", []) if f.get("role") != "signal"
+            ]
+            n_signals = len(top_factors)
+            if n_signals == 0:
+                injected.append(copy.deepcopy(profile))
+                continue
+
+            # 均匀分配权重，最后一个修正精度
+            base_w = round(1.0 / n_signals, 6)
+            signal_factors: list[dict] = []
+            for i, tf in enumerate(top_factors):
+                w = base_w if i < n_signals - 1 else round(1.0 - base_w * (n_signals - 1), 6)
+                signal_factors.append({
+                    "name": tf["factor_name"],
+                    "direction": int(tf.get("recommended_direction", 1)),
+                    "weight": w,
+                    "role": "signal",
+                })
+
+            new_profile = copy.deepcopy(profile)
+            new_profile["factors"] = signal_factors + [copy.deepcopy(f) for f in risk_factors]
+            new_profile["description"] = (
+                profile.get("description", profile.get("id", ""))
+                + "（个股因子注入）"
+            )
+            # 注入后的 profile 必须有唯一 id，避免不同搜索任务共享同一模板 id
+            # 导致 inline_profiles/<id>.json 互相覆盖
+            new_profile["id"] = f"{profile.get('id', 'profile')}_{uuid.uuid4().hex[:8]}"
+            injected.append(new_profile)
+
+        return injected
+
     def _template_enum(self, base_profiles: list[dict]) -> list[dict]:
         """枚举所有内置 profile 作为候选，返回 base_profiles 的深拷贝。
 
@@ -289,11 +340,19 @@ class StrategySearchService:
         search_space_id: str,
         start_date: str,
         end_date: str,
+        top_factors: Optional[list[dict]] = None,
     ) -> list[dict]:
-        """为单只股票生成候选策略列表。"""
+        """为单只股票生成候选策略列表。
+
+        Args:
+            top_factors: 可选，Stage-2/3 筛选出的个股有效因子列表。
+                         有则用其替换 base_profiles 的 signal 因子；无则使用全局 config。
+        """
         search_space = self._registry.load_search_space(search_space_id)
         mode = search_space.get("mode", "temporal_pool")
         base_profiles = self._registry.load_profiles(mode)
+        if top_factors:
+            base_profiles = self._inject_top_factors(base_profiles, top_factors)
         n_candidates = search_space.get("n_candidates", 50)
         return self.generate_candidates(mode, base_profiles, search_space, n_candidates)
 
@@ -303,11 +362,19 @@ class StrategySearchService:
         search_space_id: str,
         start_date: str,
         end_date: str,
+        top_factors: Optional[list[dict]] = None,
     ) -> list[dict]:
-        """为股票组生成候选策略列表。"""
+        """为股票组生成候选策略列表。
+
+        Args:
+            top_factors: 可选，Stage-2/3 筛选出的有效因子列表。
+                         有则用其替换 base_profiles 的 signal 因子；无则使用全局 config。
+        """
         search_space = self._registry.load_search_space(search_space_id)
         mode = search_space.get("mode", "temporal_pool")
         base_profiles = self._registry.load_profiles(mode)
+        if top_factors:
+            base_profiles = self._inject_top_factors(base_profiles, top_factors)
         n_candidates = search_space.get("n_candidates", 50)
         return self.generate_candidates(mode, base_profiles, search_space, n_candidates)
 

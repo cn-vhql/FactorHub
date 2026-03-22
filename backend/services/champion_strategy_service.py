@@ -13,6 +13,7 @@ ChampionStrategyService
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import logging
 import uuid
@@ -49,6 +50,28 @@ def _safe_float(val, default: float = float("nan")) -> float:
         return default
 
 
+def _candidate_is_usable(candidate: dict, scope_type: str) -> bool:
+    test_metrics = candidate.get("test_metrics") or {}
+    sharpe = _safe_float(test_metrics.get("sharpe"), 0.0)
+    annual_return = _safe_float(test_metrics.get("annual_return"), 0.0)
+
+    if sharpe <= 0 or annual_return <= -0.20:
+        return False
+
+    if scope_type != "single_stock":
+        return True
+
+    active_ratio = _safe_float(test_metrics.get("active_ratio"), float("nan"))
+    if active_ratio == active_ratio:
+        return active_ratio > 0
+
+    active_days = _safe_float(test_metrics.get("active_days"), float("nan"))
+    if active_days == active_days:
+        return active_days > 0
+
+    return True
+
+
 class ChampionStrategyService:
     """独立运行 champion 搜索任务，选出最优策略并落盘。"""
 
@@ -71,8 +94,14 @@ class ChampionStrategyService:
         search_space_id: str,
         start_date: str,
         end_date: str,
+        top_factors: Optional[list[dict]] = None,
     ) -> dict:
-        """为单只股票运行完整搜索流程，返回 champion 配置。"""
+        """为单只股票运行完整搜索流程，返回 champion 配置。
+
+        Args:
+            top_factors: 可选，Stage-2/3 筛选出的个股有效因子列表。
+                         有则注入到候选 profile 的 signal 因子；无则使用全局 config。
+        """
         return self._run(
             scope_type="single_stock",
             scope_key=code,
@@ -82,6 +111,7 @@ class ChampionStrategyService:
             codes=[code],
             universe=None,
             max_workers=1,
+            top_factors=top_factors,
         )
 
     def run_for_pool(
@@ -133,7 +163,30 @@ class ChampionStrategyService:
     def apply_champion(
         self, scope_type: str, scope_key: str, champion: dict
     ) -> None:
-        """将 champion 写入 registry，供打分接口直接调用。"""
+        """将 champion 写入 registry，供打分接口直接调用。
+
+        若 champion 携带 inline_profile（搜索产出的 profile 定义），
+        同步持久化到磁盘，确保 FactorProfileRegistryService.get_profile() 可查到。
+        """
+        # 持久化 inline profile（若存在）
+        inline_profile = champion.get("inline_profile")
+        if inline_profile:
+            _persist_inline_profile(inline_profile)
+        elif champion.get("profile_id") and champion.get("config", {}).get("factors"):
+            # 兼容：champion 本身带 factors 定义但未包装成 inline_profile 字段
+            profile_id = champion["profile_id"]
+            cfg = champion["config"]
+            inline_profile = {
+                "id": profile_id,
+                "mode": champion.get("mode", "temporal_pool"),
+                "description": cfg.get("description", f"手动应用 champion（{scope_type}:{scope_key}）"),
+                "source": "apply_champion",
+                "version": cfg.get("version", "1.0"),
+                "factors": cfg["factors"],
+                "params": cfg.get("params", {}),
+            }
+            _persist_inline_profile(inline_profile)
+
         self._registry.save(scope_type, scope_key, champion)
 
     # ------------------------------------------------------------------
@@ -150,6 +203,7 @@ class ChampionStrategyService:
         codes: Optional[list[str]],
         universe: Optional[str],
         max_workers: int,
+        top_factors: Optional[list[dict]] = None,
     ) -> dict:
         """执行完整搜索流程，返回 champion 字典。"""
         # 1. 验证时间跨度 >= 18 个月
@@ -204,12 +258,14 @@ class ChampionStrategyService:
                 codes=codes,
                 universe=universe,
                 max_workers=max_workers,
+                top_factors=top_factors,
             )
         except Exception as exc:
             # 11. 任务失败：更新 task_status.json
             task_status["status"] = "failed"
             task_status["error"] = str(exc)
             _write_json(task_dir / "task_status.json", task_status)
+            _write_run_manifest(task_dir, module="champion_strategy", data_coverage=1.0, quality_gate=[], result_status="failed")
             raise
 
         # 11. 任务完成：更新 task_status.json
@@ -217,6 +273,7 @@ class ChampionStrategyService:
         task_status["completed_at"] = _now_iso()
         task_status["champion_id"] = champion.get("champion_id")
         _write_json(task_dir / "task_status.json", task_status)
+        _write_run_manifest(task_dir, module="champion_strategy", data_coverage=1.0, quality_gate=[], result_status="completed")
 
         return champion
 
@@ -232,6 +289,7 @@ class ChampionStrategyService:
         codes: Optional[list[str]],
         universe: Optional[str],
         max_workers: int,
+        top_factors: Optional[list[dict]] = None,
     ) -> dict:
         """执行搜索核心逻辑，返回 champion 字典。"""
 
@@ -242,6 +300,7 @@ class ChampionStrategyService:
                 search_space_id=search_space_id,
                 start_date=start_date,
                 end_date=end_date,
+                top_factors=top_factors,
             )
         elif scope_type == "stock_group":
             candidates = self._search_svc.search_for_pool(
@@ -249,6 +308,7 @@ class ChampionStrategyService:
                 search_space_id=search_space_id,
                 start_date=start_date,
                 end_date=end_date,
+                top_factors=top_factors,
             )
         else:
             candidates = self._search_svc.search_for_cross_sectional(
@@ -295,19 +355,31 @@ class ChampionStrategyService:
                 "请检查数据质量或缩短时间范围。"
             )
 
-        # 7. 过滤：优先过滤 test Sharpe <= 0 或年化收益 < -20% 的候选
+        # 7. 过滤：排除 evaluation_status != "valid" 的候选（无效评估结果）
+        #    同时排除 test Sharpe <= 0 或年化收益 < -20% 的候选
         valid_candidates = [
             c for c in evaluated
-            if _safe_float(c.get("test_metrics", {}).get("sharpe"), 0.0) > 0
-            and _safe_float(c.get("test_metrics", {}).get("annual_return"), 0.0) > -0.20
+            if c.get("evaluation_status", "valid") == "valid"
+            and _candidate_is_usable(c, scope_type)
         ]
 
-        # 过滤后无有效候选时降级取最优
+        # 收集所有候选的失败原因，用于报告
+        failure_reasons = _collect_failure_reasons(evaluated, scope_type)
+
+        # 过滤后无有效候选时，任务失败（不降级）
         if not valid_candidates:
-            logger.warning(
-                f"[{task_id}] 过滤后无有效候选，降级为从所有已评价候选中选出最优"
+            _write_candidate_leaderboard(task_dir, evaluated)
+            _write_candidate_configs(task_dir, evaluated)
+            _write_failure_report(task_dir, evaluated, failure_reasons, task_id)
+            if scope_type == "single_stock":
+                raise RuntimeError(
+                    "未找到可用的 single_stock champion：所有候选在测试期要么无持仓，"
+                    "要么 Sharpe<=0，要么年化收益<-20%，要么评估状态无效。"
+                )
+            raise RuntimeError(
+                f"过滤后无 evaluation_status=valid 的候选（共 {len(evaluated)} 个已评价候选）。"
+                f"失败原因：{failure_reasons}"
             )
-            valid_candidates = evaluated
 
         # 8. 按 stability_score 降序排序，选出 champion
         valid_candidates.sort(
@@ -322,7 +394,7 @@ class ChampionStrategyService:
             "scope_type": scope_type,
             "scope_key": scope_key,
             "mode": best.get("mode", "temporal_pool"),
-            "profile_id": best.get("profile_id") or best.get("id", ""),
+            "profile_id": best.get("profile_id") or best.get("id") or best.get("candidate_id", ""),
             "config": {
                 k: v for k, v in best.items()
                 if k not in (
@@ -336,6 +408,23 @@ class ChampionStrategyService:
             "effective_from": end_date,
             "report_path": str(task_dir),
         }
+
+        # 若 champion 来自 inline 搜索候选（有 factors 定义），
+        # 将完整 profile 定义持久化到磁盘，确保进程重启后打分链仍可复用。
+        if best.get("factors"):
+            profile_id = champion["profile_id"]
+            inline_profile = {
+                "id": profile_id,
+                "mode": best.get("mode", "temporal_pool"),
+                "description": best.get("description", f"搜索产出 champion（{scope_type}:{scope_key}）"),
+                "source": "search_result",
+                "version": best.get("version", "1.0"),
+                "factors": best["factors"],
+                "params": best.get("params", {}),
+            }
+            champion["inline_profile"] = inline_profile
+            # 持久化到独立目录，供 FactorProfileRegistryService 查找
+            _persist_inline_profile(inline_profile)
 
         # 9. 调用 ChampionRegistryService.save 保存 champion
         self._registry.save(scope_type, scope_key, champion)
@@ -358,6 +447,80 @@ class ChampionStrategyService:
 # 文件写入辅助函数
 # ------------------------------------------------------------------
 
+def _collect_failure_reasons(evaluated: list[dict], scope_type: str) -> list[dict]:
+    """收集所有候选的失败原因，用于报告。"""
+    reasons = []
+    for c in evaluated:
+        candidate_id = c.get("candidate_id", c.get("profile_id") or c.get("id", ""))
+        eval_status = c.get("evaluation_status", "valid")
+        invalid_reason = c.get("invalid_reason", "")
+        test_m = c.get("test_metrics") or {}
+        sharpe = _safe_float(test_m.get("sharpe"), 0.0)
+        annual_return = _safe_float(test_m.get("annual_return"), 0.0)
+        active_ratio = _safe_float(test_m.get("active_ratio"), float("nan"))
+
+        failure_codes = []
+        if eval_status == "invalid":
+            failure_codes.append(invalid_reason or "EVALUATION_STATUS_INVALID")
+        if sharpe <= 0:
+            failure_codes.append("SHARPE_NON_POSITIVE")
+        if annual_return <= -0.20:
+            failure_codes.append("ANNUAL_RETURN_TOO_LOW")
+        if scope_type == "single_stock":
+            if active_ratio == active_ratio and active_ratio <= 0:
+                failure_codes.append("NO_ACTIVE_POSITION")
+
+        reasons.append({
+            "candidate_id": candidate_id,
+            "evaluation_status": eval_status,
+            "stability_score": _safe_float(c.get("stability_score")),
+            "failure_codes": failure_codes,
+        })
+    return reasons
+
+
+def _write_failure_report(
+    task_dir: Path,
+    evaluated: list[dict],
+    failure_reasons: list[dict],
+    task_id: str,
+) -> None:
+    """写入 failure_report.md，包含所有候选的失败原因。"""
+    now = _now_iso()
+    n_total = len(evaluated)
+
+    lines = [
+        "# Champion 搜索失败报告",
+        "",
+        f"**任务 ID**: `{task_id}`",
+        f"**生成时间**: {now}",
+        f"**结果**: 无 evaluation_status=valid 的候选，任务失败",
+        "",
+        "## 候选失败原因汇总",
+        "",
+        f"共评价 {n_total} 个候选，全部未通过过滤：",
+        "",
+        "| 候选 ID | 评估状态 | 稳定性分 | 失败原因 |",
+        "|---------|---------|---------|---------|",
+    ]
+
+    for r in failure_reasons:
+        cid = str(r.get("candidate_id", ""))[:12]
+        status = r.get("evaluation_status", "")
+        score = r.get("stability_score", float("nan"))
+        score_str = f"{score:.2f}" if score == score else "NaN"
+        codes = ", ".join(r.get("failure_codes", [])) or "无"
+        lines.append(f"| `{cid}` | {status} | {score_str} | {codes} |")
+
+    lines.append("")
+    lines.append("---")
+    lines.append(f"*报告由 ChampionStrategyService 自动生成，任务目录：`{task_dir}`*")
+    lines.append("")
+
+    report_path = task_dir / "failure_report.md"
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def _write_json(path: Path, data: dict) -> None:
     """将字典写入 JSON 文件（UTF-8，缩进 2）。"""
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
@@ -378,6 +541,7 @@ def _write_candidate_leaderboard(task_dir: Path, evaluated: list[dict]) -> None:
         "test_sharpe",
         "test_annual_return",
         "test_max_drawdown",
+        "test_active_ratio",
         "train_sharpe",
         "valid_sharpe",
         "mode",
@@ -396,6 +560,7 @@ def _write_candidate_leaderboard(task_dir: Path, evaluated: list[dict]) -> None:
             "test_sharpe": _safe_float(test_m.get("sharpe")),
             "test_annual_return": _safe_float(test_m.get("annual_return")),
             "test_max_drawdown": _safe_float(test_m.get("max_drawdown")),
+            "test_active_ratio": _safe_float(test_m.get("active_ratio")),
             "train_sharpe": _safe_float(train_m.get("sharpe")),
             "valid_sharpe": _safe_float(valid_m.get("sharpe")),
             "mode": c.get("mode", ""),
@@ -426,6 +591,69 @@ def _write_best_strategy(task_dir: Path, champion: dict) -> None:
     _write_json(task_dir / "best_strategy.json", champion)
 
 
+def _persist_inline_profile(profile: dict) -> None:
+    """将搜索产出的 inline profile 持久化到 <project_root>/data/champions/inline_profiles/{id}.json。
+
+    FactorProfileRegistryService 会在磁盘 profile 查不到时扫描此目录，
+    确保进程重启后 score_one_stock_with_profile 仍能按 profile_id 找到定义。
+    使用与 FactorProfileRegistryService 相同的项目根目录基准，避免 cwd 不一致导致
+    写入路径与读取路径不匹配。
+    """
+    profile_id = profile.get("id", "")
+    if not profile_id:
+        return
+    # 与 FactorProfileRegistryService._PROJECT_ROOT 保持一致：此文件在 backend/services/，向上两级
+    _project_root = Path(__file__).resolve().parent.parent.parent
+    inline_dir = _project_root / "data" / "champions" / "inline_profiles"
+    inline_dir.mkdir(parents=True, exist_ok=True)
+    path = inline_dir / f"{profile_id}.json"
+    path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _write_run_manifest(
+    task_dir: Path,
+    module: str,
+    data_coverage: float,
+    quality_gate: list[str],
+    result_status: str,
+) -> None:
+    """写入 run_manifest.json，包含评估任务的追溯信息。
+
+    Args:
+        task_dir: 任务产物目录
+        module: 模块/服务名称（如 "champion_strategy"、"temporal_filter_validation"）
+        data_coverage: 数据覆盖率（0.0 到 1.0）
+        quality_gate: 原因码列表（空列表表示通过）
+        result_status: 结果状态（如 "completed"、"failed"、"invalid_run"、"no_valid_candidate"）
+    """
+    from backend.services.cache_service import SCORING_SERVICE_VERSION
+    from backend.core.settings import settings
+
+    # 生成 settings 关键配置的 sha256 指纹（前 12 位）
+    key_settings = {
+        "EVAL_MIN_CODE_COVERAGE": settings.EVAL_MIN_CODE_COVERAGE,
+        "EVAL_MIN_IC_SAMPLES": settings.EVAL_MIN_IC_SAMPLES,
+        "SCORING_SERVICE_VERSION": SCORING_SERVICE_VERSION,
+    }
+    settings_json = json.dumps(key_settings, sort_keys=True)
+    settings_fingerprint = hashlib.sha256(settings_json.encode()).hexdigest()[:12]
+
+    manifest = {
+        "run_id": str(uuid.uuid4()),
+        "module": module,
+        "generated_at": _now_iso(),
+        "schema_version": "1.0",
+        "settings_fingerprint": settings_fingerprint,
+        "data_coverage": data_coverage,
+        "quality_gate": {
+            "passed": len(quality_gate) == 0,
+            "reason_codes": quality_gate,
+        },
+        "result_status": result_status,
+    }
+    _write_json(task_dir / "run_manifest.json", manifest)
+
+
 def _write_selection_report(
     task_dir: Path,
     champion: dict,
@@ -440,13 +668,19 @@ def _write_selection_report(
     test_sharpe = _safe_float(test_m.get("sharpe"))
     test_return = _safe_float(test_m.get("annual_return"))
     test_dd = _safe_float(test_m.get("max_drawdown"))
+    test_active_ratio = _safe_float(test_m.get("active_ratio"))
 
     # 统计过滤情况
+    scope_type = champion.get("scope_type", "")
     n_valid = sum(
         1 for c in evaluated
-        if _safe_float((c.get("test_metrics") or {}).get("sharpe"), 0.0) > 0
-        and _safe_float((c.get("test_metrics") or {}).get("annual_return"), 0.0) > -0.20
+        if c.get("evaluation_status", "valid") == "valid"
+        and _candidate_is_usable(c, scope_type)
     )
+    if scope_type == "single_stock":
+        filter_desc = "evaluation_status=valid、test Sharpe > 0、年化收益 > -20%，且测试期存在实际持仓"
+    else:
+        filter_desc = "evaluation_status=valid、test Sharpe > 0 且年化收益 > -20%"
 
     lines = [
         "# Champion 策略选择报告",
@@ -457,8 +691,7 @@ def _write_selection_report(
         "## 搜索摘要",
         "",
         f"- 候选策略总数：{n_total}",
-        f"- 通过过滤的候选数：{n_valid}（test Sharpe > 0 且年化收益 > -20%）",
-        f"- 降级模式：{'是' if n_valid == 0 else '否'}",
+        f"- 通过过滤的候选数：{n_valid}（{filter_desc}）",
         "",
         "## Champion 策略",
         "",
@@ -476,6 +709,7 @@ def _write_selection_report(
         f"| Sharpe | {test_sharpe:.4f} |",
         f"| 年化收益 | {test_return:.4f} |",
         f"| 最大回撤 | {test_dd:.4f} |",
+        f"| 活跃比例 | {test_active_ratio:.4f} |",
         "",
         "## 候选排行榜（前 10）",
         "",
