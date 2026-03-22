@@ -5,12 +5,16 @@ StrategyEvaluationService
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
+from pathlib import Path
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+_EVAL_RESULTS_DIR = Path("data/reports/strategy_evaluation")
 
 
 def _parse_date(d: str | date) -> date:
@@ -103,7 +107,9 @@ class StrategyEvaluationService:
     # 稳定性总分
     # ------------------------------------------------------------------
 
-    def compute_stability_score(self, window_metrics: list[dict]) -> float:
+    def compute_stability_score(
+        self, window_metrics: list[dict], min_valid_windows: int = 3
+    ) -> float | dict:
         """按 7 项权重计算稳定性总分（返回值 ∈ [0, 100]）。
 
         权重分配：
@@ -117,19 +123,43 @@ class StrategyEvaluationService:
 
         全负 Sharpe 时返回值 < 30。
 
+        当有效窗口数（test_metrics 中 sharpe 非 NaN 的窗口）< min_valid_windows 时，
+        返回包含 stability_score=NaN、evaluation_status="invalid" 的字典。
+
         Args:
             window_metrics: 每个窗口的指标字典列表，每个字典需含 test_metrics 字段。
+            min_valid_windows: 最少有效窗口数，默认 3。
 
         Returns:
-            稳定性总分，范围 [0.0, 100.0]。
+            有效时返回稳定性总分 float，范围 [0.0, 100.0]；
+            无效时返回 dict，含 stability_score=NaN、evaluation_status="invalid"。
         """
         if not window_metrics:
             return 0.0
+
+        # 统计有效窗口数：test_metrics 中 sharpe 非 NaN 的窗口
+        def _is_nan_val(v) -> bool:
+            return v is None or (isinstance(v, float) and np.isnan(v))
+
+        valid_count = sum(
+            1 for w in window_metrics
+            if not _is_nan_val(w.get("test_metrics", {}).get("sharpe"))
+        )
+
+        if valid_count < min_valid_windows:
+            return {
+                "stability_score": float("nan"),
+                "evaluation_status": "invalid",
+                "invalid_reason": "INSUFFICIENT_VALID_WINDOWS",
+            }
 
         def _safe(val, default=0.0):
             if val is None or (isinstance(val, float) and np.isnan(val)):
                 return default
             return float(val)
+
+        def clip01(x: float) -> float:
+            return max(0.0, min(1.0, x))
 
         test_sharpes: list[float] = []
         test_excess_returns: list[float] = []
@@ -137,6 +167,7 @@ class StrategyEvaluationService:
         test_irs: list[float] = []
         positive_windows: list[float] = []
         turnover_rates: list[float] = []
+        activity_ratios: list[float] = []
 
         for w in window_metrics:
             tm = w.get("test_metrics", {}) or {}
@@ -147,6 +178,7 @@ class StrategyEvaluationService:
             # excess_return: 若无则用 annual_return 近似
             excess_return = _safe(tm.get("excess_return", tm.get("annual_return")))
             turnover = _safe(tm.get("turnover_rate"), default=0.5)
+            activity_ratio = clip01(_safe(tm.get("active_ratio"), default=1.0))
 
             test_sharpes.append(sharpe)
             test_excess_returns.append(excess_return)
@@ -154,9 +186,7 @@ class StrategyEvaluationService:
             test_irs.append(ir)
             positive_windows.append(1.0 if annual_return > 0 else 0.0)
             turnover_rates.append(turnover)
-
-        def clip01(x: float) -> float:
-            return max(0.0, min(1.0, x))
+            activity_ratios.append(activity_ratio)
 
         mean_sharpe = float(np.mean(test_sharpes))
         mean_excess = float(np.mean(test_excess_returns))
@@ -164,6 +194,11 @@ class StrategyEvaluationService:
         mean_ir = float(np.mean(test_irs))
         positive_ratio = float(np.mean(positive_windows))
         mean_turnover = float(np.mean(turnover_rates))
+        mean_activity = float(np.mean(activity_ratios))
+
+        # 单股时若整个测试期从未真正持仓，不应因为“零回撤/零波动”而获得稳定性高分。
+        if mean_activity <= 0:
+            return 0.0
 
         sharpe_score = clip01(mean_sharpe / 2.0)
         excess_score = clip01(mean_excess / 0.15)
@@ -235,104 +270,161 @@ class StrategyEvaluationService:
                 window_metrics: list[dict],
             }
         """
-        profile_id: str = candidate.get("profile_id") or candidate.get("config", {}).get("id", "")
+        profile_id: str = (
+            candidate.get("profile_id")
+            or candidate.get("id")
+            or candidate.get("config", {}).get("id", "")
+        )
         params = candidate.get("config", {}).get("params", {}) or candidate.get("params", {})
         top_n: int = int(params.get("top_n", 10))
         score_threshold = params.get("score_threshold")
         rebalance: str = params.get("rebalance", "W-FRI")
 
-        windows = self._generate_walk_forward_windows(
-            start_date, end_date, train_months, valid_months, test_months, step_months
-        )
+        # 若 candidate 包含 factors 定义（搜索生成的 inline 候选），
+        # 将其注册为运行时临时 profile，确保打分链能按 profile_id 查到它。
+        # 用 try/finally 保证无论是否异常都能清理，避免进程级状态泄漏。
+        from backend.services.factor_profile_registry_service import FactorProfileRegistryService
+        _registered_runtime_id: str | None = None
+        if candidate.get("factors") and profile_id:
+            inline_profile = {
+                "id": profile_id,
+                "mode": candidate.get("mode", "temporal_pool"),
+                "description": candidate.get("description", ""),
+                "factors": candidate["factors"],
+                "params": params,
+            }
+            FactorProfileRegistryService.register_runtime_profile(inline_profile)
+            _registered_runtime_id = profile_id
 
-        if not windows:
-            raise ValueError(
-                f"时间范围 {start_date} ~ {end_date} 无法生成完整的 walk-forward 窗口，"
-                f"请确保时间跨度 ≥ {train_months + valid_months + test_months} 个月。"
+        hold_days: int = int(params.get("hold_days", 5))
+
+        try:
+            windows = self._generate_walk_forward_windows(
+                start_date, end_date, train_months, valid_months, test_months, step_months
             )
 
-        window_metrics: list[dict] = []
-
-        for w in windows:
-            wid = w["window_id"]
-            try:
-                train_metrics = self._tfvs.run_temporal_pool_backtest(
-                    codes=codes,
-                    profile_id=profile_id,
-                    start_date=w["train_start"],
-                    end_date=w["train_end"],
-                    top_n=top_n,
-                    score_threshold=score_threshold,
-                    rebalance=rebalance,
-                    max_workers=max_workers,
+            if not windows:
+                raise ValueError(
+                    f"时间范围 {start_date} ~ {end_date} 无法生成完整的 walk-forward 窗口，"
+                    f"请确保时间跨度 ≥ {train_months + valid_months + test_months} 个月。"
                 )
-            except Exception as exc:
-                logger.warning(f"窗口 {wid} 训练期回测失败，已跳过: {exc}")
-                train_metrics = _empty_metrics()
 
-            try:
-                valid_metrics = self._tfvs.run_temporal_pool_backtest(
-                    codes=codes,
-                    profile_id=profile_id,
-                    start_date=w["valid_start"],
-                    end_date=w["valid_end"],
-                    top_n=top_n,
-                    score_threshold=score_threshold,
-                    rebalance=rebalance,
-                    max_workers=max_workers,
+            window_metrics: list[dict] = []
+
+            for w in windows:
+                wid = w["window_id"]
+                try:
+                    train_metrics = self._tfvs.run_temporal_pool_backtest(
+                        codes=codes,
+                        profile_id=profile_id,
+                        start_date=w["train_start"],
+                        end_date=w["train_end"],
+                        top_n=top_n,
+                        score_threshold=score_threshold,
+                        rebalance=rebalance,
+                        hold_days=hold_days,
+                        max_workers=max_workers,
+                    )
+                except Exception as exc:
+                    logger.warning(f"窗口 {wid} 训练期回测失败，已跳过: {exc}")
+                    train_metrics = _empty_metrics()
+
+                try:
+                    valid_metrics = self._tfvs.run_temporal_pool_backtest(
+                        codes=codes,
+                        profile_id=profile_id,
+                        start_date=w["valid_start"],
+                        end_date=w["valid_end"],
+                        top_n=top_n,
+                        score_threshold=score_threshold,
+                        rebalance=rebalance,
+                        hold_days=hold_days,
+                        max_workers=max_workers,
+                    )
+                except Exception as exc:
+                    logger.warning(f"窗口 {wid} 验证期回测失败，已跳过: {exc}")
+                    valid_metrics = _empty_metrics()
+
+                try:
+                    test_metrics = self._tfvs.run_temporal_pool_backtest(
+                        codes=codes,
+                        profile_id=profile_id,
+                        start_date=w["test_start"],
+                        end_date=w["test_end"],
+                        top_n=top_n,
+                        score_threshold=score_threshold,
+                        rebalance=rebalance,
+                        hold_days=hold_days,
+                        max_workers=max_workers,
+                    )
+                except Exception as exc:
+                    logger.warning(f"窗口 {wid} 测试期回测失败，已跳过: {exc}")
+                    test_metrics = _empty_metrics()
+
+                # 过拟合检测
+                train_sharpe = _safe_float(train_metrics.get("sharpe"))
+                test_sharpe = _safe_float(test_metrics.get("sharpe"))
+                overfitting_flag = (
+                    not np.isnan(train_sharpe)
+                    and not np.isnan(test_sharpe)
+                    and test_sharpe < 0.3 * train_sharpe
                 )
-            except Exception as exc:
-                logger.warning(f"窗口 {wid} 验证期回测失败，已跳过: {exc}")
-                valid_metrics = _empty_metrics()
 
-            try:
-                test_metrics = self._tfvs.run_temporal_pool_backtest(
-                    codes=codes,
-                    profile_id=profile_id,
-                    start_date=w["test_start"],
-                    end_date=w["test_end"],
-                    top_n=top_n,
-                    score_threshold=score_threshold,
-                    rebalance=rebalance,
-                    max_workers=max_workers,
+                window_metrics.append(
+                    {
+                        **w,
+                        "train_metrics": train_metrics,
+                        "valid_metrics": valid_metrics,
+                        "test_metrics": test_metrics,
+                        "overfitting_flag": overfitting_flag,
+                    }
                 )
-            except Exception as exc:
-                logger.warning(f"窗口 {wid} 测试期回测失败，已跳过: {exc}")
-                test_metrics = _empty_metrics()
 
-            # 过拟合检测
-            train_sharpe = _safe_float(train_metrics.get("sharpe"))
-            test_sharpe = _safe_float(test_metrics.get("sharpe"))
-            overfitting_flag = (
-                not np.isnan(train_sharpe)
-                and not np.isnan(test_sharpe)
-                and test_sharpe < 0.3 * train_sharpe
-            )
+            stability_result = self.compute_stability_score(window_metrics)
 
-            window_metrics.append(
-                {
-                    **w,
-                    "train_metrics": train_metrics,
-                    "valid_metrics": valid_metrics,
-                    "test_metrics": test_metrics,
-                    "overfitting_flag": overfitting_flag,
+            agg_train = _aggregate_metrics([wm["train_metrics"] for wm in window_metrics])
+            agg_valid = _aggregate_metrics([wm["valid_metrics"] for wm in window_metrics])
+            agg_test = _aggregate_metrics([wm["test_metrics"] for wm in window_metrics])
+
+            if isinstance(stability_result, dict):
+                result = {
+                    "train_metrics": agg_train,
+                    "valid_metrics": agg_valid,
+                    "test_metrics": agg_test,
+                    "stability_score": stability_result["stability_score"],
+                    "evaluation_status": stability_result.get("evaluation_status", "invalid"),
+                    "invalid_reason": stability_result.get("invalid_reason"),
+                    "window_metrics": window_metrics,
                 }
+            else:
+                result = {
+                    "train_metrics": agg_train,
+                    "valid_metrics": agg_valid,
+                    "test_metrics": agg_test,
+                    "stability_score": stability_result,
+                    "window_metrics": window_metrics,
+                }
+
+            # 写出 run_manifest.json
+            from backend.services.champion_strategy_service import _write_run_manifest
+            eval_dir = _EVAL_RESULTS_DIR / str(uuid.uuid4())
+            eval_dir.mkdir(parents=True, exist_ok=True)
+            eval_status = result.get("evaluation_status", "valid")
+            quality_gate = [result["invalid_reason"]] if result.get("invalid_reason") else []
+            _write_run_manifest(
+                eval_dir,
+                module="strategy_evaluation",
+                data_coverage=1.0,
+                quality_gate=quality_gate,
+                result_status="completed" if eval_status == "valid" else eval_status,
             )
 
-        stability_score = self.compute_stability_score(window_metrics)
+            return result
 
-        # 汇总各期均值指标
-        agg_train = _aggregate_metrics([wm["train_metrics"] for wm in window_metrics])
-        agg_valid = _aggregate_metrics([wm["valid_metrics"] for wm in window_metrics])
-        agg_test = _aggregate_metrics([wm["test_metrics"] for wm in window_metrics])
-
-        return {
-            "train_metrics": agg_train,
-            "valid_metrics": agg_valid,
-            "test_metrics": agg_test,
-            "stability_score": stability_score,
-            "window_metrics": window_metrics,
-        }
+        finally:
+            # 无论成功还是异常，都清理运行时临时 profile，防止进程级状态泄漏
+            if _registered_runtime_id:
+                FactorProfileRegistryService.unregister_runtime_profile(_registered_runtime_id)
 
     # ------------------------------------------------------------------
     # 截面候选评价
@@ -402,6 +494,10 @@ class StrategyEvaluationService:
                 end_date=end_date,
                 factor_names=list(factor_weights.keys()),
             )
+
+        # 覆盖率门禁：_load_universe_df 返回 invalid_run 字典时直接透传
+        if isinstance(universe_df, dict) and universe_df.get("result_status") == "invalid_run":
+            return universe_df
 
         window_metrics: list[dict] = []
 
@@ -489,19 +585,46 @@ class StrategyEvaluationService:
                 }
             )
 
-        stability_score = self.compute_stability_score(window_metrics)
+        stability_result = self.compute_stability_score(window_metrics)
 
         agg_train = _aggregate_metrics([wm["train_metrics"] for wm in window_metrics])
         agg_valid = _aggregate_metrics([wm["valid_metrics"] for wm in window_metrics])
         agg_test = _aggregate_metrics([wm["test_metrics"] for wm in window_metrics])
 
-        return {
-            "train_metrics": agg_train,
-            "valid_metrics": agg_valid,
-            "test_metrics": agg_test,
-            "stability_score": stability_score,
-            "window_metrics": window_metrics,
-        }
+        if isinstance(stability_result, dict):
+            result = {
+                "train_metrics": agg_train,
+                "valid_metrics": agg_valid,
+                "test_metrics": agg_test,
+                "stability_score": stability_result["stability_score"],
+                "evaluation_status": stability_result.get("evaluation_status", "invalid"),
+                "invalid_reason": stability_result.get("invalid_reason"),
+                "window_metrics": window_metrics,
+            }
+        else:
+            result = {
+                "train_metrics": agg_train,
+                "valid_metrics": agg_valid,
+                "test_metrics": agg_test,
+                "stability_score": stability_result,
+                "window_metrics": window_metrics,
+            }
+
+        # 写出 run_manifest.json
+        from backend.services.champion_strategy_service import _write_run_manifest
+        eval_dir = _EVAL_RESULTS_DIR / str(uuid.uuid4())
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        eval_status = result.get("evaluation_status", "valid")
+        quality_gate = [result["invalid_reason"]] if result.get("invalid_reason") else []
+        _write_run_manifest(
+            eval_dir,
+            module="strategy_evaluation",
+            data_coverage=1.0,
+            quality_gate=quality_gate,
+            result_status="completed" if eval_status == "valid" else eval_status,
+        )
+
+        return result
 
 
 # ------------------------------------------------------------------
@@ -516,6 +639,11 @@ def _empty_metrics() -> dict:
         "win_rate": float("nan"),
         "volatility": float("nan"),
         "total_return": float("nan"),
+        "active_days": 0.0,
+        "trading_days": 0.0,
+        "active_ratio": 0.0,
+        "rebalance_count": 0.0,
+        "active_rebalance_count": 0.0,
     }
 
 
@@ -548,7 +676,7 @@ def _load_universe_df(
     start_date: str,
     end_date: str,
     factor_names: list[str],
-) -> "pd.DataFrame":
+) -> "pd.DataFrame | dict":
     """
     从 DataService 加载截面回测所需的 DataFrame，并计算所需因子列。
 
@@ -559,9 +687,12 @@ def _load_universe_df(
 
     因子列通过 TemporalScoringService._compute_factors() 计算，
     支持 8 个内置因子；未知因子名会记录警告并跳过。
+
+    当数据覆盖率低于 EVAL_MIN_CODE_COVERAGE 时，返回 invalid_run 字典。
     """
     import pandas as pd
     from backend.services.data_service import data_service
+    from backend.core.settings import settings as _settings
 
     if not codes:
         # 尝试把 universe 当作 CSV 路径
@@ -583,17 +714,49 @@ def _load_universe_df(
         )
         return pd.DataFrame(columns=["date", "stock_code", "close"])
 
-    # 延迟导入，避免循环依赖
-    from backend.services.temporal_scoring_service import temporal_scoring_service as _tss
-
     # 拉取数据时往前多取 lookback，确保因子计算有足够历史
     from datetime import datetime, timedelta
-    lookback_days = getattr(_tss, "lookback_days", 372)
+    lookback_days = 372  # 默认 lookback，temporal_scoring_service 导入延迟到门禁通过后
     fetch_start = (
         datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=lookback_days)
     ).strftime("%Y-%m-%d")
 
-    price_data = data_service.get_multiple_stocks_data(codes, fetch_start, end_date)
+    report = data_service.get_multiple_stocks_data_with_report(codes, fetch_start, end_date)
+
+    # 覆盖率门禁
+    reason_codes = []
+    if report.code_coverage < _settings.EVAL_MIN_CODE_COVERAGE:
+        reason_codes.append("CODE_COVERAGE_TOO_LOW")
+
+    # 有效日期数门禁
+    if report.data:
+        all_dates = set()
+        for df in report.data.values():
+            if df is not None and not df.empty:
+                all_dates.update(df.index.tolist())
+        valid_date_count = len(all_dates)
+    else:
+        valid_date_count = 0
+
+    if valid_date_count < _settings.EVAL_MIN_IC_SAMPLES:
+        reason_codes.append("INSUFFICIENT_IC_SAMPLES")
+
+    if reason_codes:
+        logger.warning(
+            f"_load_universe_df: 覆盖率门禁触发 {reason_codes}，"
+            f"code_coverage={report.code_coverage:.2%}, valid_dates={valid_date_count}，返回 invalid_run"
+        )
+        return {
+            "result_status": "invalid_run",
+            "reason_codes": reason_codes,
+            "code_coverage": report.code_coverage,
+        }
+
+    # 延迟导入，避免循环依赖（仅在门禁通过后才需要）
+    from backend.services.temporal_scoring_service import temporal_scoring_service as _tss
+    lookback_days = getattr(_tss, "lookback_days", lookback_days)
+
+    price_data = report.data
 
     frames = []
     for code, ohlcv_df in price_data.items():

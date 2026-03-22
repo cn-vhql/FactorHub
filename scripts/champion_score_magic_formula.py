@@ -30,11 +30,11 @@ def parse_args():
     parser.add_argument("--date",  default=today,         help="当日打分日期 YYYY-MM-DD")
     parser.add_argument("--start", default="2022-01-01",  help="冠军搜索回测起始日期（需 ≥18 个月跨度）")
     parser.add_argument("--end",   default=today,         help="冠军搜索回测结束日期")
-    parser.add_argument("--pool",  default=str(ROOT / "tests" / "magic_formula_top10_pool.csv"))
+    parser.add_argument("--pool",  default=str(ROOT / "scripts" / "data" / "magic_formula_top10_pool.csv"))
     parser.add_argument("--space", default="temporal_default", help="search_space_id")
     parser.add_argument(
         "--out",
-        default=str(ROOT / "tests" / f"champion_scores_{datetime.now().strftime('%Y%m%d')}.csv"),
+        default=str(ROOT / "scripts" / "data" / f"champion_scores_{datetime.now().strftime('%Y%m%d')}.csv"),
     )
     parser.add_argument(
         "--no-wf", action="store_true",

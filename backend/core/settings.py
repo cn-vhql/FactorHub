@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     SCORING_RESULTS_DIR: Path = Path("data/reports/scoring_jobs")
     SCORING_LOOKBACK_DAYS: int = 372
 
+    # 评估链路质量门禁配置
+    EVAL_MIN_CODE_COVERAGE: float = 0.85
+    EVAL_MIN_IC_SAMPLES: int = 30
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # 创建必要的目录

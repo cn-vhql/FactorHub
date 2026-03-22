@@ -53,7 +53,8 @@ class TestCrossSectionalE2EWithUniverseDf:
         from backend.services.strategy_evaluation_service import StrategyEvaluationService
 
         codes = ["000001", "000002", "000003", "000004", "000005"]
-        universe_df = self._make_universe_df(codes, n_days=120)
+        # Use 300 days to ensure ≥3 valid windows with the given window config
+        universe_df = self._make_universe_df(codes, n_days=300)
 
         candidate = {
             "universe_df": universe_df,
@@ -87,7 +88,7 @@ class TestCrossSectionalE2EWithUniverseDf:
                 candidate=candidate,
                 universe="test_universe",
                 start_date="2023-01-01",
-                end_date="2023-06-30",
+                end_date="2024-01-01",
                 train_months=3,
                 valid_months=1,
                 test_months=1,

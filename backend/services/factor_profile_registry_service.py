@@ -5,14 +5,15 @@ FactorProfileRegistryService
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Optional
 
+logger = logging.getLogger(__name__)
 
 # 项目根目录（此文件位于 backend/services/，向上两级）
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-
 _TEMPORAL_POOL_FILE = _PROJECT_ROOT / "config" / "temporal_pool_profiles.json"
 _CROSS_SECTIONAL_FILE = _PROJECT_ROOT / "config" / "cross_sectional_profiles.json"
 _SEARCH_SPACE_FILE = _PROJECT_ROOT / "config" / "strategy_search_space.json"
@@ -24,13 +25,35 @@ class FactorProfileRegistryService:
     """加载、校验、分发 profile 配置和 search space 配置的服务。
 
     支持热重载：每次调用时检测配置文件 mtime，文件变更后自动重新加载。
+    支持运行时注册临时 inline profile（用于搜索候选评估，不持久化）。
     """
+
+    # 进程级临时 profile 注册表，供搜索候选评估使用
+    _runtime_profiles: dict[str, dict] = {}
 
     def __init__(self) -> None:
         # 缓存：{文件路径: (mtime, 数据)}
         self._profile_cache: dict[str, tuple[float, list[dict]]] = {}
         # search space 缓存：(mtime, 数据)
         self._search_space_cache: tuple[float, dict] | None = None
+
+    @classmethod
+    def register_runtime_profile(cls, profile: dict) -> str:
+        """将 inline profile 注册到运行时临时表，返回其 id。
+
+        若 profile 无 'id' 字段则自动生成一个。不持久化到磁盘。
+        """
+        import uuid as _uuid
+        pid = profile.get("id") or f"_runtime_{_uuid.uuid4().hex[:8]}"
+        profile = dict(profile)
+        profile["id"] = pid
+        cls._runtime_profiles[pid] = profile
+        return pid
+
+    @classmethod
+    def unregister_runtime_profile(cls, profile_id: str) -> None:
+        """从运行时临时表中移除 profile（可选清理）。"""
+        cls._runtime_profiles.pop(profile_id, None)
 
     # ------------------------------------------------------------------
     # 内部：文件加载与热重载
@@ -80,6 +103,11 @@ class FactorProfileRegistryService:
     def get_profile(self, profile_id: str) -> dict:
         """按 profile_id 获取单个 profile。
 
+        查找顺序：
+        1. 进程内运行时临时表（评估期间注册的 inline 候选）
+        2. 磁盘配置文件（temporal_pool_profiles.json / cross_sectional_profiles.json）
+        3. 持久化 inline profile 目录（data/champions/inline_profiles/）
+
         Args:
             profile_id: profile 的唯一标识。
 
@@ -87,11 +115,25 @@ class FactorProfileRegistryService:
             对应的完整 profile 配置字典。
 
         Raises:
-            KeyError: 当 profile_id 不存在时。
+            KeyError: 当 profile_id 在所有来源中均不存在时。
         """
+        # 1. 进程内运行时临时表（评估期间短暂存活）
+        if profile_id in self.__class__._runtime_profiles:
+            return self.__class__._runtime_profiles[profile_id]
+
+        # 2. 磁盘配置文件
         for profile in self._all_profiles():
             if profile.get("id") == profile_id:
                 return profile
+
+        # 3. 持久化 inline profile 目录（搜索产出的 champion profile）
+        inline_path = _PROJECT_ROOT / "data" / "champions" / "inline_profiles" / f"{profile_id}.json"
+        if inline_path.exists():
+            try:
+                return json.loads(inline_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning(f"读取 inline profile 文件失败 {inline_path}: {exc}")
+
         raise KeyError(f"Profile '{profile_id}' not found")
 
     def load_search_space(self, space_id: str) -> dict:

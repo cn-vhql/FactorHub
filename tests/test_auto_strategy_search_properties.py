@@ -842,7 +842,15 @@ def test_stability_score_range_invariant_property7a(window_metrics):
     对任意非空 window_metrics 列表，compute_stability_score 返回值必须 ∈ [0.0, 100.0]。
     """
     service = StrategyEvaluationService.__new__(StrategyEvaluationService)
-    score = service.compute_stability_score(window_metrics)
+    result = service.compute_stability_score(window_metrics)
+    # compute_stability_score may return a dict (invalid) or float (valid)
+    if isinstance(result, dict):
+        status = result.get("evaluation_status", "")
+        assert status == "invalid", (
+            f"dict 返回值的 evaluation_status 应为 'invalid'，但得到: {status}"
+        )
+        return  # invalid 结果不需要检查范围
+    score = float(result)
     assert 0.0 <= score <= 100.0, (
         f"compute_stability_score 返回值 {score} 超出 [0.0, 100.0] 范围，"
         f"window_metrics={window_metrics}"
@@ -868,7 +876,15 @@ def test_stability_score_all_negative_sharpe_property7b(window_metrics):
         assert wm["test_metrics"]["sharpe"] < 0, "测试数据生成错误：Sharpe 应为负"
 
     service = StrategyEvaluationService.__new__(StrategyEvaluationService)
-    score = service.compute_stability_score(window_metrics)
+    result = service.compute_stability_score(window_metrics)
+    # compute_stability_score may return a dict (invalid) or float (valid)
+    if isinstance(result, dict):
+        status = result.get("evaluation_status", "")
+        assert status == "invalid", (
+            f"dict 返回值的 evaluation_status 应为 'invalid'，但得到: {status}"
+        )
+        return  # invalid 结果不适用此属性
+    score = float(result)
     assert score < 30.0, (
         f"全负 Sharpe 时 compute_stability_score 返回值 {score} 应 < 30，"
         f"window_metrics={window_metrics}"

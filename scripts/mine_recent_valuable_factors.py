@@ -21,10 +21,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stocks",
         nargs="+",
-        required=True,
+        default=["002594"],
         help="已筛选股票列表，如 000001.SZ 600519.SH",
     )
-    parser.add_argument("--end-date", required=True, help="评估结束日期，格式 YYYY-MM-DD")
+    parser.add_argument("--end-date", default="2026-03-21", help="评估结束日期，格式 YYYY-MM-DD")
     parser.add_argument("--eval-days", type=int, default=90, help="最近评估窗口（自然日）")
     parser.add_argument("--lookback-days", type=int, default=240, help="因子预热窗口（自然日）")
     parser.add_argument(

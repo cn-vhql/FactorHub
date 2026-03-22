@@ -33,12 +33,12 @@ def parse_args():
     )
     parser.add_argument(
         "--pool",
-        default=str(ROOT / "tests" / "magic_formula_top10_pool.csv"),
+        default=str(ROOT / "scripts" / "data" / "magic_formula_top10_pool.csv"),
         help="股票池 CSV 路径",
     )
     parser.add_argument(
         "--out",
-        default=str(ROOT / "tests" / f"magic_formula_scores_{datetime.now().strftime('%Y%m%d')}.csv"),
+        default=str(ROOT / "scripts" / "data" / f"magic_formula_scores_{datetime.now().strftime('%Y%m%d')}.csv"),
         help="输出 CSV 路径",
     )
     return parser.parse_args()

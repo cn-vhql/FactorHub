@@ -8,6 +8,33 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Any, Dict
 
+# 打分服务版本号，用于缓存版本指纹
+SCORING_SERVICE_VERSION = "1.0.0"
+
+
+def build_versioned_cache_key(
+    base_key: str,
+    factor_expression: str = "",
+    profile_definition: str = "",
+) -> str:
+    """
+    构建包含内容 hash 的版本化缓存 key。
+
+    当因子表达式、profile 定义或打分服务版本号发生变更时，
+    生成不同的缓存 key，使旧缓存自动失效。
+
+    Args:
+        base_key: 基础缓存键（如 code/date/profile_id 组合）
+        factor_expression: 因子表达式字符串
+        profile_definition: profile 定义字符串
+
+    Returns:
+        格式为 "{base_key}:{content_hash[:8]}" 的版本化缓存键
+    """
+    content = factor_expression + "|" + profile_definition + "|" + SCORING_SERVICE_VERSION
+    content_hash = hashlib.sha256(content.encode()).hexdigest()[:8]
+    return f"{base_key}:{content_hash}"
+
 from sqlalchemy.orm import Session
 
 from backend.core.settings import settings

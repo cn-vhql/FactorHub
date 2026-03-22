@@ -534,6 +534,16 @@ class FactorService:
                     "code": "close / open",
                     "description": "收盘相对开盘强度",
                 },
+                {
+                    "name": "overnight_return_1",
+                    "code": "open / REF(close, 1) - 1",
+                    "description": "隔夜跳空收益（今日开盘相对昨日收盘的涨跌幅）",
+                },
+                {
+                    "name": "intraday_return_1",
+                    "code": "close / open - 1",
+                    "description": "盘中强弱（收盘相对开盘的涨跌幅）",
+                },
             ],
             "动量趋势": [
                 {
@@ -571,6 +581,16 @@ class FactorService:
                     "code": "(close - close.shift(10)) / close.shift(10)",
                     "description": "10日变化率",
                 },
+                {
+                    "name": "efficiency_ratio_20",
+                    "code": "np.abs(close - REF(close, 20)) / (SUM(np.abs(close - REF(close, 1)), 20) + 1e-12)",
+                    "description": "20日趋势效率（1=完美单边趋势，0=纯震荡）",
+                },
+                {
+                    "name": "kama_ratio_20",
+                    "code": "close / KAMA(close, timeperiod=20)",
+                    "description": "自适应趋势偏离（收盘价相对KAMA的比值，>1表示价格在KAMA上方）",
+                },
             ],
             "波动率风险": [
                 {
@@ -598,6 +618,16 @@ class FactorService:
                     "code": "(close - BBANDS(close, timeperiod=20)[2]) / (BBANDS(close, timeperiod=20)[0] - BBANDS(close, timeperiod=20)[2])",
                     "description": "价格在布林带中的相对位置",
                 },
+                {
+                    "name": "parkinson_vol_20",
+                    "code": "np.sqrt((np.log(high / low) ** 2).rolling(20).mean() / (4 * np.log(2)))",
+                    "description": "Parkinson波动率（基于高低价的波动率估计，比收益率标准差更高效）",
+                },
+                {
+                    "name": "garman_klass_vol_20",
+                    "code": "np.sqrt((0.5 * (np.log(high / low) ** 2) - (2 * np.log(2) - 1) * (np.log(close / open) ** 2)).rolling(20).mean())",
+                    "description": "Garman-Klass波动率（基于OHLC的高效波动率估计）",
+                },
             ],
             "成交量资金流": [
                 {
@@ -614,6 +644,11 @@ class FactorService:
                     "name": "obv_slope",
                     "code": "OBV(close, volume) - OBV(close, volume).shift(5)",
                     "description": "OBV近5日斜率",
+                },
+                {
+                    "name": "volume_zscore_20",
+                    "code": "(volume - AVE(volume, 20)) / (STD(volume, 20) + 1e-12)",
+                    "description": "成交量Z-Score（异常放量强度，衡量当日成交量偏离20日均量的标准差倍数）",
                 },
             ],
             "结构模式": [
@@ -727,6 +762,16 @@ class FactorService:
                     "name": "gap_down",
                     "code": "(high < REF(low, 1)).astype(int)",
                     "description": "向下跳空（今日最高价小于昨日最低价）",
+                },
+                {
+                    "name": "body_ratio",
+                    "code": "(close - open) / (high - low + 1e-12)",
+                    "description": "K线实体强度（实体占日内振幅的比例，正为阳线，负为阴线）",
+                },
+                {
+                    "name": "upper_shadow_ratio",
+                    "code": "(high - MAX(open, close)) / (high - low + 1e-12)",
+                    "description": "上影线抛压（上影线占日内振幅的比例，越大表示上方抛压越强）",
                 },
             ],
             "市场情绪": [
@@ -861,6 +906,16 @@ class FactorService:
                     "code": "(close - LLV(low, 20)) / (HHV(high, 20) - LLV(low, 20))",
                     "description": "价格在20日高低区间的相对位置",
                 },
+                {
+                    "name": "close_location_value",
+                    "code": "(close - low) / (high - low + 1e-12)",
+                    "description": "收盘位于日内区间的位置（0=收于最低，1=收于最高）",
+                },
+                {
+                    "name": "breakout_strength_20",
+                    "code": "(close - HHV(high, 20).shift(1)) / (ATR(high, low, close, timeperiod=14) + 1e-12)",
+                    "description": "ATR归一化突破强度（正值表示突破20日前高，以ATR为单位）",
+                },
             ],
             "资金流动": [
                 {
@@ -892,6 +947,11 @@ class FactorService:
                     "name": "price_vwma_ratio",
                     "code": "close / (SUM(close * volume, 20) / SUM(volume, 20))",
                     "description": "价格相对VWMA的位置",
+                },
+                {
+                    "name": "cmf_20",
+                    "code": "SUM((((close - low) - (high - close)) / (high - low + 1e-12)) * volume, 20) / (SUM(volume, 20) + 1e-12)",
+                    "description": "Chaikin Money Flow（20日资金流向，正值表示资金净流入）",
                 },
             ],
         }

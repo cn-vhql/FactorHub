@@ -413,9 +413,14 @@ class TemporalScoringService:
         registry = FactorProfileRegistryService()
         profile = registry.get_profile(profile_id)
 
+        # 优先使用 profile 自身配置的 percentile_window，保证与单日打分口径一致
+        window = profile.get("params", {}).get("percentile_window", window)
+
         # 一次 IO 拉取足够的历史数据
+        # window 是交易日数，换算为自然日需乘以约 1.5（每年约 252 交易日 / 365 自然日）
         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        fetch_start = (start_dt - timedelta(days=window)).strftime("%Y-%m-%d")
+        fetch_days = int(window * 1.5) + 60  # 额外 60 天缓冲
+        fetch_start = (start_dt - timedelta(days=fetch_days)).strftime("%Y-%m-%d")
         df = data_service.get_stock_data(code, fetch_start, end_date)
 
         if len(df) < window + 20:
@@ -596,9 +601,10 @@ class TemporalScoringService:
         if cache_path.exists():
             return pd.read_parquet(cache_path)
 
-        # 一次 IO 拉取足够的历史数据（往前多取 window 个自然日）
+        # 一次 IO 拉取足够的历史数据（window 是交易日数，换算为自然日需乘以约 1.5）
         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        fetch_start = (start_dt - timedelta(days=window)).strftime("%Y-%m-%d")
+        fetch_days = int(window * 1.5) + 60
+        fetch_start = (start_dt - timedelta(days=fetch_days)).strftime("%Y-%m-%d")
         df = data_service.get_stock_data(code, fetch_start, end_date)
 
         if len(df) < window + 20:
@@ -729,11 +735,12 @@ class TaskManager:
         codes: list[str],
         trade_date: str,
         profile_id: str | None = None,
+        per_stock_profiles: dict[str, str] | None = None,
     ) -> str:
         """
         创建任务目录结构，写入 input_codes.csv 和初始 status.json。
         返回 task_id（UUID）。
-        profile_id 若提供则写入 status.json，供 run_task 使用。
+        profile_id / per_stock_profiles 若提供则写入 status.json，供 run_task 使用。
         """
         task_id = str(uuid.uuid4())
         task_dir = self._task_dir(task_id)
@@ -751,6 +758,7 @@ class TaskManager:
             "status": "pending",
             "trade_date": trade_date,
             "profile_id": profile_id,
+            "per_stock_profiles": per_stock_profiles or {},
             "total": len(codes),
             "processed": 0,
             "success_count": 0,
@@ -840,26 +848,30 @@ class TaskManager:
         codes: list[str],
         trade_date: str,
         profile_id: str | None = None,
+        per_stock_profiles: dict[str, str] | None = None,
     ) -> None:
         """后台执行任务（由 FastAPI BackgroundTasks 调用）。
 
-        profile_id 优先从参数取，其次从 status.json 读取，
-        确保异步路径和自动升级路径都能正确带上 profile_id。
+        profile_id / per_stock_profiles 优先从参数取，其次从 status.json 读取，
+        确保异步路径和自动升级路径都能正确带上 per_stock_profiles 语义。
         """
         try:
             # 更新状态为 running
             status = self.get_status(task_id)
-            # 若调用方未传 profile_id，从已持久化的 status 中读取
+            # 若调用方未传，从已持久化的 status 中读取
             effective_profile_id = profile_id or status.get("profile_id")
+            effective_per_stock = per_stock_profiles or status.get("per_stock_profiles") or {}
             status["status"] = "running"
             status["started_at"] = datetime.now(timezone.utc).isoformat()
             status["updated_at"] = datetime.now(timezone.utc).isoformat()
             self._write_status(task_id, status)
 
             def _score_one(code: str) -> dict:
-                if effective_profile_id:
+                # 优先级：per_stock_profiles[code] > profile_id > 默认评分
+                pid = effective_per_stock.get(code) or effective_profile_id
+                if pid:
                     return self.scoring_service.score_one_stock_with_profile(
-                        code, trade_date, effective_profile_id
+                        code, trade_date, pid
                     )
                 return self.scoring_service.score_one_stock(code, trade_date)
 

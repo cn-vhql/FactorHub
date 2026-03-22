@@ -296,6 +296,100 @@ def test_strategy_d_cash_weight():
     assert (nav > 0).all(), "strategy D NAV should always be positive"
 
 
+def test_run_temporal_pool_backtest_marks_never_active_as_inactive():
+    """单股模式若整个区间从未达到阈值，不应返回可用回测指标。"""
+    from backend.services.temporal_filter_validation_service import TemporalFilterValidationService
+
+    dates = pd.date_range("2024-01-01", periods=10, freq="B")
+    score_panel = pd.DataFrame(
+        {
+            "date": dates,
+            "code": ["000001"] * len(dates),
+            "score": [10.0] * len(dates),
+            "rank": [1] * len(dates),
+        }
+    )
+    price_data = {"000001": make_price_df(n_days=40, seed=7)}
+
+    mock_data = MagicMock()
+    mock_data.get_multiple_stocks_data.return_value = price_data
+
+    svc = TemporalFilterValidationService.__new__(TemporalFilterValidationService)
+    svc.data_service = mock_data
+    svc.scoring_service = MagicMock()
+    svc.output_base_dir = Path(tempfile.mkdtemp())
+    svc.score_cache_dir = Path(tempfile.mkdtemp())
+
+    with patch(
+        "backend.services.temporal_pool_service.TemporalPoolService.score_pool_history",
+        return_value=score_panel,
+    ):
+        metrics = svc.run_temporal_pool_backtest(
+            codes=["000001"],
+            profile_id="dummy_profile",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+            top_n=1,
+            score_threshold=80.0,
+            hold_days=5,
+        )
+
+    assert metrics["active_days"] == 0.0
+    assert metrics["active_ratio"] == 0.0
+    assert np.isnan(metrics["annual_return"])
+    assert np.isnan(metrics["sharpe"])
+    assert np.isnan(metrics["win_rate"])
+
+
+def test_run_temporal_pool_backtest_win_rate_ignores_flat_days():
+    """win_rate 只统计真实持仓日，不应把空仓零收益日算进分母。"""
+    from backend.services.temporal_filter_validation_service import TemporalFilterValidationService
+
+    dates = pd.date_range("2024-01-01", periods=4, freq="B")
+    score_panel = pd.DataFrame(
+        {
+            "date": dates,
+            "code": ["000001"] * len(dates),
+            "score": [90.0] * len(dates),
+            "rank": [1] * len(dates),
+        }
+    )
+    price_data = {"000001": make_price_df(n_days=40, seed=8)}
+    nav_series = pd.Series([1.0, 1.1, 1.1, 1.21], index=dates)
+    active_flags = pd.Series([True, True, False, True], index=dates)
+
+    mock_data = MagicMock()
+    mock_data.get_multiple_stocks_data.return_value = price_data
+
+    svc = TemporalFilterValidationService.__new__(TemporalFilterValidationService)
+    svc.data_service = mock_data
+    svc.scoring_service = MagicMock()
+    svc.output_base_dir = Path(tempfile.mkdtemp())
+    svc.score_cache_dir = Path(tempfile.mkdtemp())
+
+    with patch(
+        "backend.services.temporal_pool_service.TemporalPoolService.score_pool_history",
+        return_value=score_panel,
+    ):
+        with patch.object(
+            TemporalFilterValidationService,
+            "_equal_weight_backtest_with_diagnostics",
+            return_value=(nav_series, active_flags),
+        ):
+            metrics = svc.run_temporal_pool_backtest(
+                codes=["000001"],
+                profile_id="dummy_profile",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+                top_n=1,
+                hold_days=5,
+            )
+
+    assert metrics["active_days"] == 3.0
+    assert metrics["trading_days"] == 4.0
+    assert metrics["win_rate"] == 1.0
+
+
 # ---------------------------------------------------------------------------
 # 8.5 Property test — No look-ahead bias (Property 1)
 # Feature: temporal-filter-validation, Property 1: 无未来函数
