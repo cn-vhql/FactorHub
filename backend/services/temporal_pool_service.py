@@ -119,6 +119,39 @@ class TemporalPoolService:
         return result.head(top_n).reset_index(drop=True)
 
     # ------------------------------------------------------------------
+    # 股票池列表
+    # ------------------------------------------------------------------
+
+    def list_pools(self) -> list[dict]:
+        """列出所有已知的时序股票池配置。
+
+        从 data/champions/inline_profiles/ 目录扫描 mode=temporal_pool 的 profile，
+        每个 profile 作为一个池条目返回。
+        """
+        from pathlib import Path
+        import json as _json
+
+        _project_root = Path(__file__).resolve().parent.parent.parent
+        inline_dir = _project_root / "data" / "champions" / "inline_profiles"
+        if not inline_dir.exists():
+            return []
+
+        pools: list[dict] = []
+        for path in sorted(inline_dir.glob("*.json")):
+            try:
+                profile = _json.loads(path.read_text(encoding="utf-8"))
+                if profile.get("mode") == "temporal_pool":
+                    pools.append({
+                        "id": profile.get("id", path.stem),
+                        "description": profile.get("description", ""),
+                        "source": profile.get("source", ""),
+                        "version": profile.get("version", ""),
+                    })
+            except Exception as exc:
+                logger.warning(f"读取 pool profile 失败 {path}: {exc}")
+        return pools
+
+    # ------------------------------------------------------------------
     # 历史池内评分面板
     # ------------------------------------------------------------------
 

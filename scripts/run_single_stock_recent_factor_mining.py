@@ -17,7 +17,7 @@ from pipeline_common import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="挖掘单只股票近期可用因子")
-    parser.add_argument("--stock", default="002594", help="股票代码")
+    parser.add_argument("--stock", default="600089", help="股票代码")
     parser.add_argument("--end-date", default="2026-03-21", help="评估结束日期 YYYY-MM-DD")
     parser.add_argument("--eval-days", type=int, default=90, help="近期评估窗口（自然日）")
     parser.add_argument("--lookback-days", type=int, default=240, help="因子预热窗口（自然日）")

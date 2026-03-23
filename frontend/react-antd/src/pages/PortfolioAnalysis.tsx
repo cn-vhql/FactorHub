@@ -49,6 +49,7 @@ interface OptimizationResult {
   weights: Record<string, number>
   method: string
   factors: string[]
+  stock_code?: string
   metrics: {
     return: number
     ic: number
@@ -444,7 +445,7 @@ const PortfolioAnalysis: React.FC = () => {
 
     const weights = data.weights
     const factorNames = Object.keys(weights)
-    const methodDisplay = {
+    const methodDisplay: Record<string, string> = {
       equal_weight: '等权重',
       ic_weight: 'IC加权',
       ir_weight: 'IR加权',
@@ -454,54 +455,59 @@ const PortfolioAnalysis: React.FC = () => {
     }
     const method = data.method || 'equal_weight'
 
-    // 从因子列表中获取因子代码
-    const getFactorCode = (factorName: string) => {
+    // 判断是否是函数型代码（与后端 FactorCalculator.calculate 保持一致：去掉注释和空行后再判断）
+    const isFunctionCode = (code: string): boolean => {
+      const codeLines = code.split('\n').filter(line => {
+        const trimmed = line.trim()
+        return trimmed.length > 0 && !trimmed.startsWith('#')
+      })
+      return codeLines.length > 0 && codeLines[0].trim().startsWith('def ')
+    }
+
+    // 对表达式型代码做列名替换（仅替换裸列名，不重复替换已有 df['...'] 形式）
+    const replaceColNames = (expr: string): string => {
+      return expr
+        .replace(/(?<!df\[')(\bopen\b)(?!')/g, "df['open']")
+        .replace(/(?<!df\[')(\bclose\b)(?!')/g, "df['close']")
+        .replace(/(?<!df\[')(\bhigh\b)(?!')/g, "df['high']")
+        .replace(/(?<!df\[')(\blow\b)(?!')/g, "df['low']")
+        .replace(/(?<!df\[')(\bvolume\b)(?!')/g, "df['volume']")
+    }
+
+    // 为每个子因子生成内联辅助函数定义（缩进4空格，嵌套在外层 calculate_factor 里）
+    // 函数型子因子：整体内联为 _sub_factor_N(df)，避免只抽 return 行丢失中间变量
+    // 表达式型子因子：直接内联表达式
+    const getSubFactorSnippet = (factorName: string, index: number): { helperDef: string; callExpr: string } => {
       const factor = factors.find(f => f.name === factorName)
       if (factor && factor.code) {
         const code = factor.code.trim()
-
-        // 如果是def函数定义
-        if (code.startsWith('def')) {
-          try {
-            // 提取函数体
-            const lines = code.split('\n')
-
-            // 找到return语句，提取返回表达式
-            const returnLineIndex = lines.findIndex(line => line.trim().startsWith('return'))
-            if (returnLineIndex !== -1) {
-              let returnExpr = lines[returnLineIndex].trim().replace('return', '').trim()
-
-              // 为表达式添加df前缀，处理常见的列名
-              returnExpr = returnExpr
-                .replace(/\bopen\b/g, "df['open']")
-                .replace(/\bclose\b/g, "df['close']")
-                .replace(/\bhigh\b/g, "df['high']")
-                .replace(/\blow\b/g, "df['low']")
-                .replace(/\bvolume\b/g, "df['volume']")
-
-              return returnExpr
-            }
-          } catch (e) {
-            console.warn(`解析因子 ${factorName} 的代码失败:`, e)
-          }
+        if (isFunctionCode(code)) {
+          // 函数型：把整个函数重命名后内联，再调用
+          // 将原函数名（calculate_factor 或任意名）替换为 _sub_factor_N
+          const renamedCode = code.replace(
+            /^(\s*def\s+)\w+(\s*\()/m,
+            `$1_sub_factor_${index}$2`
+          )
+          // 缩进4空格（嵌套在外层函数体内）
+          const indented = renamedCode.split('\n').map(l => '    ' + l).join('\n')
+          return { helperDef: indented, callExpr: `_sub_factor_${index}(df)` }
+        } else {
+          // 表达式型：直接替换列名后内联
+          return { helperDef: '', callExpr: replaceColNames(code) }
         }
-
-        // 如果不是def函数，或者是解析失败，直接使用原代码
-        // 为表达式添加df前缀
-        let processedCode = code
-          .replace(/\bopen\b/g, "df['open']")
-          .replace(/\bclose\b/g, "df['close']")
-          .replace(/\bhigh\b/g, "df['high']")
-          .replace(/\blow\b/g, "df['low']")
-          .replace(/\bvolume\b/g, "df['volume']")
-
-        return processedCode
       }
-
-      // 如果没有找到因子代码，返回默认值
       console.warn(`未找到因子 ${factorName} 的代码，使用默认值`)
-      return `df['${factorName}']`
+      return { helperDef: '', callExpr: `df['close']` }
     }
+
+    // 收集所有辅助函数定义和调用表达式
+    const helpers: string[] = []
+    const callExprs: string[] = []
+    factorNames.forEach((name, index) => {
+      const { helperDef, callExpr } = getSubFactorSnippet(name, index + 1)
+      if (helperDef) helpers.push(helperDef)
+      callExprs.push(callExpr)
+    })
 
     let code = `# 组合因子 - ${methodDisplay[method] || method}优化
 # 生成时间: ${new Date().toLocaleString()}
@@ -516,34 +522,38 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
     import numpy as np
 `
 
+    // 内联辅助函数定义
+    if (helpers.length > 0) {
+      code += '\n' + helpers.join('\n\n') + '\n'
+    }
+
     // 为每个因子生成计算代码
     factorNames.forEach((name, index) => {
       const weight = weights[name]
-      const factorCode = getFactorCode(name)
-
+      const callExpr = callExprs[index]
       code += `
     # 计算因子: ${name} (权重: ${(weight * 100).toFixed(2)}%)
     try:
-        factor_${index + 1} = ${factorCode}
-        # 标准化
-        factor_${index + 1} = (factor_${index + 1} - factor_${index + 1}.mean()) / (factor_${index + 1}.std() + 1e-8)
-    except:
-        factor_${index + 1} = pd.Series(0, index=df.index)
+        factor_${index + 1} = pd.Series(${callExpr}, dtype=float).reindex(df.index)
+        _std_${index + 1} = factor_${index + 1}.std()
+        factor_${index + 1} = (factor_${index + 1} - factor_${index + 1}.mean()) / (_std_${index + 1} if _std_${index + 1} > 1e-8 else 1.0)
+    except Exception as _e_${index + 1}:
+        import logging as _log_${index + 1}
+        _log_${index + 1}.getLogger(__name__).warning(f"组合因子子项 ${name} 计算失败: {_e_${index + 1}}")
+        factor_${index + 1} = pd.Series(0.0, index=df.index)
 `
     })
 
-    // 组合因子
+    // Bug 3 修复：用括号包裹整个加权表达式，避免跨行语法错误
+    const weightedParts = factorNames.map((name, index) => {
+      const weight = weights[name]
+      return `        ${weight.toFixed(4)} * factor_${index + 1}`
+    })
     code += `
     # 加权组合
-    composite = `
-    const parts: string[] = []
-    factorNames.forEach((name, index) => {
-      const weight = weights[name]
-      parts.push(`${weight.toFixed(4)} * factor_${index + 1}`)
-    })
-    code += parts.join(' +\n        ')
-
-    code += `
+    composite = (
+${weightedParts.join(' +\n')}
+    )
 
     return composite
 `
@@ -559,7 +569,7 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
       return
     }
 
-    const methodDisplay = {
+    const methodDisplay: Record<string, string> = {
       equal_weight: '等权重',
       ic_weight: 'IC加权',
       ir_weight: 'IR加权',
@@ -595,6 +605,14 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
 
     try {
       setSavingFactor(true)
+
+      // 保存前先校验代码语法
+      const validateResp = await axios.post('/api/factors/validate', { code: factorData.code })
+      if (!validateResp.data.success) {
+        message.error(`组合因子代码校验失败: ${validateResp.data.message || '语法错误'}`)
+        return
+      }
+
       const response = await axios.post('/api/factors', factorData)
 
       if (response.data.success) {

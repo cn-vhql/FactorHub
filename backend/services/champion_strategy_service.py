@@ -17,7 +17,7 @@ import hashlib
 import json
 import logging
 import uuid
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -27,7 +27,7 @@ _TASK_RESULTS_DIR = Path("data/reports/strategy_search")
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _parse_date(d: str) -> date:

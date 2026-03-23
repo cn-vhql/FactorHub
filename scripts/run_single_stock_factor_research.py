@@ -17,7 +17,7 @@ from pipeline_common import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="研究单只股票的历史有效因子")
-    parser.add_argument("--stock", default="002594", help="股票代码，如 600519 或 000001.SZ")
+    parser.add_argument("--stock", default="600089", help="股票代码，如 600519 或 000001.SZ")
     parser.add_argument("--start-date", default="2023-01-01", help="研究开始日期 YYYY-MM-DD")
     parser.add_argument("--end-date", default="2026-03-21", help="研究结束日期 YYYY-MM-DD")
     parser.add_argument("--horizons", default="1,5,10,20", help="未来收益周期列表")

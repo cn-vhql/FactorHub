@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="为单只股票搜索冠军策略")
-    parser.add_argument("--stock", default="002594", help="股票代码")
+    parser.add_argument("--stock", default="600089", help="股票代码")
     parser.add_argument("--start-date", default="2023-01-01", help="搜索开始日期 YYYY-MM-DD")
     parser.add_argument("--end-date", default="2026-03-21", help="搜索结束日期 YYYY-MM-DD")
     parser.add_argument(

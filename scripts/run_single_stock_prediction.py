@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Stage-5: 单票当日预测")
-    parser.add_argument("--stock", default="002594", help="股票代码")
+    parser.add_argument("--stock", default="600089", help="股票代码")
     parser.add_argument(
         "--trade-date",
         default="",

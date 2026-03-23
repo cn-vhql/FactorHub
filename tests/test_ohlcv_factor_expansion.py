@@ -107,8 +107,9 @@ EXPECTED_WARMUP_NANS = {
 }
 
 
+@pytest.mark.requires_talib
 class TestP0FactorWarmupNaN:
-    """Task 2.2: 验证每个 P0 因子的 warmup NaN 数量"""
+    """Task 2.2: 验证每个 P0 因子的 warmup NaN 数量（需要真实 talib）"""
 
     @pytest.mark.parametrize("factor_name,expected_nans", list(EXPECTED_WARMUP_NANS.items()))
     def test_warmup_nan_count(self, ohlcv_250, factor_name, expected_nans):
@@ -312,8 +313,9 @@ class TestZeroVolumeBoundary:
 
 # ── Task 2.7: 验证 breakout_strength_20 使用 .shift(1) 不含未来函数 ──────────
 
+@pytest.mark.requires_talib
 class TestBreakoutStrengthNoLookahead:
-    """Task 2.7: 验证 breakout_strength_20 使用 .shift(1) 不含未来函数"""
+    """Task 2.7: 验证 breakout_strength_20 使用 .shift(1) 不含未来函数（需要真实 talib）"""
 
     def test_shift1_differs_from_no_shift(self, ohlcv_250):
         """带 .shift(1) 的版本与不带 .shift(1) 的版本结果不同，证明 shift 有效"""

@@ -128,13 +128,6 @@ async def health_check():
     return {"status": "healthy"}
 
 
-# 全局异常处理
-# 覆盖FastAPI的默认JSON响应编码器
-@app.on_event("startup")
-async def startup_event():
-    """应用启动事件 - 覆盖默认JSON编码器"""
-    app.json_encoder = NumpyJSONEncoder
-
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     """全局异常处理"""

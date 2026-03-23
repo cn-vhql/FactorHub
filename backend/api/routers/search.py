@@ -100,9 +100,17 @@ def _run_champion_job(task_id: str, job_type: str, request: Any, svc: ChampionSt
     status_file = task_dir / "task_status.json"
 
     def _write_status(status: str, message: str = "", champion: dict | None = None, error: str | None = None):
+        # 读取已有 created_at，避免覆盖
+        existing_created_at = None
+        if status_file.exists():
+            try:
+                existing_created_at = json.loads(status_file.read_text()).get("created_at")
+            except Exception:
+                pass
         payload = {
             "task_id": task_id,
             "status": status,
+            "created_at": existing_created_at or datetime.now(timezone.utc).isoformat(),
             "message": message,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "champion": champion,
