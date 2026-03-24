@@ -26,7 +26,8 @@ class _LegacySSLAdapter(HTTPAdapter):
         ctx.set_ciphers("DEFAULT@SECLEVEL=1")
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        ctx.options |= ssl.OP_LEGACY_SERVER_CONNECT
+        if hasattr(ssl, "OP_LEGACY_SERVER_CONNECT"):
+            ctx.options |= ssl.OP_LEGACY_SERVER_CONNECT
         kwargs["ssl_context"] = ctx
         return super().init_poolmanager(*args, **kwargs)
 

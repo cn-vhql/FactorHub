@@ -123,6 +123,12 @@ async def calculate_factor(request: CalculateRequest):
 
                 logger.info(f"因子计算完成，有效值数量: {factor_series.notna().sum()}/{len(factor_series)}")
 
+                # 检查是否全为 NaN（因子不可用，如 TimesFM 在无 torch 环境下）
+                if factor_series.notna().sum() == 0:
+                    logger.warning(f"股票 {stock_code} 因子 {request.factor_name} 全部为 NaN，可能是该因子依赖的运行环境不满足（如 TimesFM 需要 torch）")
+                    errors.append(f"因子 '{request.factor_name}' 返回全空值，该因子可能需要额外依赖（如 torch/TimesFM 模型）才能运行")
+                    continue
+
                 # 将因子值添加到数据中
                 data[request.factor_name] = factor_series
 

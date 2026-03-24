@@ -36,7 +36,7 @@ request.interceptors.response.use(
 
       switch (status) {
         case 400:
-          message = data.message || '请求参数错误'
+          message = data.detail || data.message || '请求参数错误'
           break
         case 401:
           message = '未授权，请重新登录'
@@ -45,13 +45,13 @@ request.interceptors.response.use(
           message = '拒绝访问'
           break
         case 404:
-          message = '请求的资源不存在'
+          message = data.detail || '请求的资源不存在'
           break
         case 500:
-          message = data.message || '服务器错误'
+          message = data.detail || data.message || '服务器错误'
           break
         default:
-          message = data.message || `请求失败 (${status})`
+          message = data.detail || data.message || `请求失败 (${status})`
       }
     } else if (error.request) {
       message = '网络错误，请检查网络连接'

@@ -1727,9 +1727,9 @@ const FactorDetail: React.FC = () => {
         stock: stockData,
         factor: factorData
       })
-    } catch (error) {
+    } catch (error: any) {
       console.error('加载行情数据失败:', error)
-      message.error('加载行情数据失败')
+      message.error(error?.message || '加载行情数据失败')
     } finally {
       setLoadingChart(false)
     }
