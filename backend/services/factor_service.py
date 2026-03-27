@@ -193,6 +193,148 @@ class FactorCalculator:
             """常量序列"""
             return pd.Series([value] * length)
 
+        # ============ 新增数学函数 ============
+        def ABS(series):
+            """绝对值"""
+            if isinstance(series, pd.Series):
+                return series.abs()
+            return np.abs(series)
+
+        def SQRT(series):
+            """平方根"""
+            if isinstance(series, pd.Series):
+                return series.apply(np.sqrt)
+            return np.sqrt(series)
+
+        def LN(series):
+            """自然对数"""
+            if isinstance(series, pd.Series):
+                return series.apply(np.log)
+            return np.log(series)
+
+        def POW(series, n):
+            """幂运算"""
+            if isinstance(series, pd.Series):
+                return series.apply(lambda x: np.power(x, n))
+            return np.power(series, n)
+
+        def RD(series, n=3):
+            """四舍五入"""
+            if isinstance(series, pd.Series):
+                return series.round(n)
+            return np.round(series, n)
+
+        # ============ 新增序列函数 ============
+        def DIFF(series, n=1):
+            """差分函数：当前值减n日前的值"""
+            if isinstance(series, pd.Series):
+                return series.diff(n)
+            return pd.Series(series).diff(n).values
+
+        def SLOPE(series, n):
+            """线性回归斜率"""
+            def _slope(x):
+                if len(x) < 2:
+                    return 0
+                return np.polyfit(range(n), x, deg=1)[0]
+
+            if isinstance(series, pd.Series):
+                return series.rolling(window=n).apply(_slope, raw=True)
+            return pd.Series(series).rolling(window=n).apply(_slope, raw=True).values
+
+        def FORCAST(series, n):
+            """线性回归预测值"""
+            def _forcast(x):
+                if len(x) < 2:
+                    return x[-1]
+                coeffs = np.polyfit(range(n), x, deg=1)
+                return np.polyval(coeffs, n - 1)
+
+            if isinstance(series, pd.Series):
+                return series.rolling(window=n).apply(_forcast, raw=True)
+            return pd.Series(series).rolling(window=n).apply(_forcast, raw=True).values
+
+        def AVEDEV(series, n):
+            """平均绝对偏差"""
+            def _avedev(x):
+                return (np.abs(x - x.mean())).mean()
+
+            if isinstance(series, pd.Series):
+                return series.rolling(window=n).apply(_avedev, raw=True)
+            return pd.Series(series).rolling(window=n).apply(_avedev, raw=True).values
+
+        def DMA(series, alpha):
+            """动态移动平均"""
+            if isinstance(alpha, (int, float)):
+                # 固定alpha值
+                if isinstance(series, pd.Series):
+                    return series.ewm(alpha=alpha, adjust=False).mean()
+                return pd.Series(series).ewm(alpha=alpha, adjust=False).mean().values
+            else:
+                # 序列alpha值
+                alpha_array = np.array(alpha)
+                alpha_array[np.isnan(alpha_array)] = 1.0
+                result = np.zeros(len(series))
+                result[0] = series[0] if isinstance(series, (list, np.ndarray)) else series.iloc[0]
+
+                series_array = series.values if isinstance(series, pd.Series) else series
+                for i in range(1, len(series_array)):
+                    result[i] = alpha_array[i] * series_array[i] + (1 - alpha_array[i]) * result[i - 1]
+
+                if isinstance(series, pd.Series):
+                    return pd.Series(result, index=series.index)
+                return result
+
+        # ============ 新增条件判断函数 ============
+        def BARSLASTCOUNT(condition):
+            """统计连续满足条件的周期数"""
+            if not isinstance(condition, pd.Series):
+                condition = pd.Series(condition)
+
+            result = pd.Series(0, index=condition.index, dtype=int)
+            count = 0
+
+            for i in range(len(condition)):
+                if condition.iloc[i]:
+                    count += 1
+                    result.iloc[i] = count
+                else:
+                    count = 0
+                    result.iloc[i] = 0
+
+            return result
+
+        def BARSSINCEN(condition, n):
+            """N周期内第一次条件成立到现在的周期数"""
+            if not isinstance(condition, pd.Series):
+                condition = pd.Series(condition)
+
+            def _barssincen(x):
+                if np.argmax(x) == 0 and not x[0]:
+                    return 0
+                return n - 1 - np.argmax(x) if np.argmax(x) or x[0] else 0
+
+            return condition.rolling(window=n).apply(_barssincen, raw=True).fillna(0).astype(int)
+
+        def VALUEWHEN(condition, series):
+            """当条件成立时取序列值，否则取上次成立时的值"""
+            if not isinstance(condition, pd.Series):
+                condition = pd.Series(condition)
+            if not isinstance(series, pd.Series):
+                series = pd.Series(series)
+
+            result = pd.Series(index=condition.index, dtype=float)
+            last_value = None
+
+            for i in range(len(condition)):
+                if condition.iloc[i]:
+                    last_value = series.iloc[i]
+                    result.iloc[i] = last_value
+                else:
+                    result.iloc[i] = last_value
+
+            return result
+
         return {
             # 移动平均函数
             "SMA": SMA,
@@ -217,9 +359,24 @@ class FactorCalculator:
             # 条件函数
             "IF": IF,
             "BETWEEN": BETWEEN,
-            # 数学函数
+            # 基础数学函数
             "MAX": MAX,
             "MIN": MIN,
+            "ABS": ABS,
+            "SQRT": SQRT,
+            "LN": LN,
+            "POW": POW,
+            "RD": RD,
+            # 序列操作函数
+            "DIFF": DIFF,
+            "SLOPE": SLOPE,
+            "FORCAST": FORCAST,
+            "AVEDEV": AVEDEV,
+            "DMA": DMA,
+            # 条件判断函数
+            "BARSLASTCOUNT": BARSLASTCOUNT,
+            "BARSSINCEN": BARSSINCEN,
+            "VALUEWHEN": VALUEWHEN,
             # 其他函数
             "BARSLAST": BARSLAST,
             "CONST": CONST,
