@@ -3,16 +3,19 @@ FastAPI主应用
 """
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.encoders import jsonable_encoder
 from contextlib import asynccontextmanager
 import sys
 from pathlib import Path
 import numpy as np
 import json
+import os
 
 # 添加项目根目录到Python路径
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.core.settings import settings
 from backend.core.database import init_db
@@ -99,6 +102,28 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
+# ============================================
+# Static File Serving (for production)
+# ============================================
+FRONTEND_DIST = PROJECT_ROOT / "frontend" / "react-antd" / "dist"
+
+if FRONTEND_DIST.exists():
+    print(f"Serving static files from: {FRONTEND_DIST}")
+    # Mount static assets directory (js, css, images, etc.)
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
+
+
+@app.exception_handler(404)
+async def spa_fallback(request, exc):
+    """SPA fallback - return index.html for 404 errors (non-API routes)"""
+    # Only handle non-API routes for HTML requests
+    if FRONTEND_DIST.exists() and not request.url.path.startswith(("/api", "/docs", "/redoc", "/openapi.json")):
+        return FileResponse(FRONTEND_DIST / "index.html")
+    return JSONResponse(
+        status_code=404,
+        content={"detail": "Not Found"}
+    )
+
 
 # 注册路由
 app.include_router(factors.router, prefix="/api/factors", tags=["因子管理"])
@@ -111,9 +136,9 @@ app.include_router(scoring.router, prefix="/api/scoring", tags=["时序打分"])
 app.include_router(search.router, prefix="/api/search", tags=["策略搜索"])
 
 
-@app.get("/")
-async def root():
-    """根路径"""
+@app.get("/api")
+async def api_root():
+    """API 根路径"""
     return {
         "message": "FactorFlow API",
         "version": "1.0.0",

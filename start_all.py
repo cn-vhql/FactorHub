@@ -9,11 +9,17 @@ import os
 import signal
 from pathlib import Path
 
+def get_pnpm_cmd():
+    if os.name == "nt":
+        return "pnpm.cmd"
+    else:
+        return "pnpm"
+
 def check_pnpm_installed():
     """检查pnpm是否已安装"""
     try:
         result = subprocess.run(
-            ["pnpm", "--version"],
+            [get_pnpm_cmd(), "--version"],
             capture_output=True,
             text=True,
             timeout=5
@@ -117,7 +123,7 @@ def main():
         print("  执行: pnpm dev")
 
         frontend_process = subprocess.Popen(
-            ["pnpm", "dev"],
+            [get_pnpm_cmd(), "dev"],
             cwd=str(frontend_dir),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

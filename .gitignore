@@ -23,14 +23,23 @@ env/
 .DS_Store
 Thumbs.db
 
-# Database
-data/db/
-*.db
-*.sqlite3
+# Temporary files
+*.tmp
+*.bak
+*.swp
+data/db/factorflow.db
+.pytest_cache
+todo.md
+tests/
+web_demo.md
+memory/
+docs/
+nul
+skills
 
-# Logs
-*.log
-backend.log
+logs/
+vite-app/
+vite-naive-ui/
 
 # Data files
 data/cache/

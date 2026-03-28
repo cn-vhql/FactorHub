@@ -1,6 +1,7 @@
 """
 应用配置模块
 """
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -69,6 +70,13 @@ class Settings(BaseSettings):
         self.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         self.AKSHARE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self.SCORING_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+        # 检测数据库文件是否存在，若不存在则从样本文件复制
+        db_file = self.DB_DIR / "factorflow.db"
+        sample_db_file = self.DB_DIR / "factorflow.sample.db"
+        if not db_file.exists() and sample_db_file.exists():
+            print(f"Copying sample database file: factorflow.sample.db -> {db_file}")
+            shutil.copy2(sample_db_file, db_file)
 
 
 # 全局配置实例
