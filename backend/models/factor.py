@@ -16,6 +16,7 @@ class FactorModel(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     code: Mapped[str] = mapped_column(Text, nullable=False)  # 因子计算代码
+    formula_type: Mapped[str] = mapped_column(String(20), nullable=False, default="mylanguage")  # mylanguage 或 python
     description: Mapped[str] = mapped_column(Text, nullable="", default="")
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="user")  # preset 或 user
     category: Mapped[str] = mapped_column(String(50), nullable="", default="")  # 因子分类
@@ -29,6 +30,7 @@ class FactorModel(Base):
             "id": self.id,
             "name": self.name,
             "code": self.code,
+            "formula_type": self.formula_type,
             "description": self.description,
             "source": self.source,
             "category": self.category,

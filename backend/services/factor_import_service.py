@@ -1,25 +1,21 @@
 """
-因子导入服务 - 从CSV文件导入因子
+因子导入服务 - 外部因子值导入预校验与模板
 """
 import pandas as pd
-from typing import Optional, Dict, List
-from pathlib import Path
-from sqlalchemy.orm import Session
+from typing import Dict
 
-from backend.core.database import get_db_session
-from backend.repositories.factor_repository import FactorRepository
-from backend.models.factor import FactorModel
+IMPORT_DISABLED_MESSAGE = (
+    "导入工具当前未开放“外部因子值直接入库执行”能力。"
+    "系统仅支持可直接执行的麦语言或 Python 因子表达式；"
+    "为避免生成不可执行条目，CSV / DataFrame 导入已禁用。"
+)
 
 
 class FactorImportService:
-    """因子导入服务类"""
+    """因子导入服务类。当前仅保留模板与格式校验能力。"""
 
     def __init__(self):
         pass
-
-    def _get_db(self) -> Session:
-        """获取数据库会话"""
-        return get_db_session()
 
     def import_from_csv(
         self,
@@ -45,61 +41,13 @@ class FactorImportService:
             导入结果信息
         """
         try:
-            # 读取CSV文件
-            df = pd.read_csv(csv_file_path)
-
-            # 验证必需列
-            if date_column not in df.columns:
-                raise ValueError(f"CSV文件中缺少日期列: {date_column}")
-            if factor_column not in df.columns:
-                raise ValueError(f"CSV文件中缺少因子值列: {factor_column}")
-
-            # 验证数据
-            if len(df) == 0:
-                raise ValueError("CSV文件为空")
-
-            # 生成因子代码（表达式形式）
-            factor_code = self._generate_import_code(date_column, factor_column)
-
-            # 保存到数据库
-            db = self._get_db()
-            try:
-                repo = FactorRepository(db)
-
-                # 检查因子是否已存在
-                existing = repo.get_by_name(factor_name)
-                if existing:
-                    raise ValueError(f"因子 '{factor_name}' 已存在")
-
-                # 创建因子
-                factor = FactorModel(
-                    name=factor_name,
-                    code=factor_code,
-                    description=description or f"从CSV文件导入: {Path(csv_file_path).name}",
-                    source="user",
-                    category=category,
-                    is_active=1,
-                )
-
-                repo.create(factor)
-
-                return {
-                    "success": True,
-                    "factor_id": factor.id,
-                    "factor_name": factor.name,
-                    "row_count": len(df),
-                    "date_range": f"{df[date_column].min()} 至 {df[date_column].max()}",
-                    "message": f"成功导入因子 '{factor_name}'，共 {len(df)} 条数据",
-                }
-
-            finally:
-                db.close()
+            raise RuntimeError(IMPORT_DISABLED_MESSAGE)
 
         except Exception as e:
             return {
                 "success": False,
                 "error": str(e),
-                "message": f"导入失败: {e}",
+                "message": str(e),
             }
 
     def import_from_dataframe(
@@ -126,57 +74,13 @@ class FactorImportService:
             导入结果信息
         """
         try:
-            # 验证必需列
-            if date_column not in df.columns:
-                raise ValueError(f"DataFrame中缺少日期列: {date_column}")
-            if factor_column not in df.columns:
-                raise ValueError(f"DataFrame中缺少因子值列: {factor_column}")
-
-            # 验证数据
-            if len(df) == 0:
-                raise ValueError("DataFrame为空")
-
-            # 生成因子代码
-            factor_code = self._generate_import_code(date_column, factor_column)
-
-            # 保存到数据库
-            db = self._get_db()
-            try:
-                repo = FactorRepository(db)
-
-                # 检查因子是否已存在
-                existing = repo.get_by_name(factor_name)
-                if existing:
-                    raise ValueError(f"因子 '{factor_name}' 已存在")
-
-                # 创建因子
-                factor = FactorModel(
-                    name=factor_name,
-                    code=factor_code,
-                    description=description or "从DataFrame导入",
-                    source="user",
-                    category=category,
-                    is_active=1,
-                )
-
-                repo.create(factor)
-
-                return {
-                    "success": True,
-                    "factor_id": factor.id,
-                    "factor_name": factor.name,
-                    "row_count": len(df),
-                    "message": f"成功导入因子 '{factor_name}'，共 {len(df)} 条数据",
-                }
-
-            finally:
-                db.close()
+            raise RuntimeError(IMPORT_DISABLED_MESSAGE)
 
         except Exception as e:
             return {
                 "success": False,
                 "error": str(e),
-                "message": f"导入失败: {e}",
+                "message": str(e),
             }
 
     def validate_csv_format(
@@ -197,6 +101,7 @@ class FactorImportService:
             验证结果
         """
         try:
+            # 读取CSV文件
             df = pd.read_csv(csv_file_path)
 
             result = {
@@ -241,6 +146,8 @@ class FactorImportService:
             result["info"] = {
                 "row_count": len(df),
                 "columns": list(df.columns),
+                "import_enabled": False,
+                "import_notice": IMPORT_DISABLED_MESSAGE,
             }
 
             return result
@@ -252,38 +159,6 @@ class FactorImportService:
                 "warnings": [],
                 "info": {},
             }
-
-    def _generate_import_code(self, date_column: str, factor_column: str) -> str:
-        """
-        生成导入因子的代码
-
-        Args:
-            date_column: 日期列名
-            factor_column: 因子值列名
-
-        Returns:
-            因子计算代码
-        """
-        # 返回一个函数形式的代码
-        return f'''def calculate_factor(df):
-    """
-    从导入的CSV数据中读取因子值
-    日期列: {date_column}
-    因子值列: {factor_column}
-    """
-    import pandas as pd
-
-    # 确保索引是日期
-    if "{date_column}" in df.columns:
-        df = df.set_index("{date_column}")
-        df.index = pd.to_datetime(df.index)
-
-    # 返回因子值列
-    if "{factor_column}" in df.columns:
-        return pd.to_numeric(df["{factor_column}"], errors="coerce")
-    else:
-        raise ValueError(f"列 '{factor_column}' 不存在")
-'''
 
     def get_import_template(self) -> pd.DataFrame:
         """

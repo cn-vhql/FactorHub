@@ -70,3 +70,7 @@ vite-naive-ui/
 
 CLAUDE.md
 scripts/
+data/ai_model_config.json
+test-logs
+data/db/backups/
+data/test-logs/

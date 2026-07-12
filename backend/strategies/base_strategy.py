@@ -94,8 +94,7 @@ class BaseStrategy(ABC):
         # 4. 计算组合收益（权重 * 收益率）
         portfolio_returns = weights * df["next_return"]
 
-        # 5. 扣除手续费（简化版：假设每次调仓产生手续费）
-        # 权重变化时产生手续费
+        # 5. 按权重变化估算调仓手续费
         weight_change = weights.diff().abs()
         commission = weight_change * self.commission_rate
         portfolio_returns = portfolio_returns - commission

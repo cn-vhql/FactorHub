@@ -10,12 +10,14 @@ import {
   DatabaseOutlined,
   AppstoreOutlined,
   CloudServerOutlined,
+  ApiOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
   ClockCircleOutlined,
   ReloadOutlined
 } from '@ant-design/icons'
 import { api } from '@/services/api'
+import AiModelConfigModal from '@/components/AiModelConfigModal'
 import './Home.css'
 
 interface Stats {
@@ -47,6 +49,7 @@ const Home: React.FC = () => {
     akshareHealthy: false,
     lastCheck: '检查中...'
   })
+  const [modelConfigVisible, setModelConfigVisible] = useState(false)
 
   const modules = [
     {
@@ -181,7 +184,7 @@ const Home: React.FC = () => {
                       创建因子、启动挖掘任务或运行回测，几分钟内即可获得专业的量化分析结果
                     </p>
                     <div className="button-row">
-                      <Space size="middle">
+                      <Space size="middle" wrap>
                         <Button
                           type="primary"
                           size="large"
@@ -196,6 +199,13 @@ const Home: React.FC = () => {
                           onClick={() => navigate('/factor-mining')}
                         >
                           启动挖掘
+                        </Button>
+                        <Button
+                          size="large"
+                          icon={<ApiOutlined />}
+                          onClick={() => setModelConfigVisible(true)}
+                        >
+                          配置模型
                         </Button>
                       </Space>
                     </div>
@@ -332,6 +342,11 @@ const Home: React.FC = () => {
           ))}
         </Row>
       </div>
+
+      <AiModelConfigModal
+        open={modelConfigVisible}
+        onClose={() => setModelConfigVisible(false)}
+      />
 
     </div>
   )

@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional
 from datetime import datetime
+from backend.services.portfolio_analysis_service import portfolio_analysis_service
 
 try:
     import vectorbt as vbt
@@ -32,6 +33,85 @@ class VectorBTBacktestService:
         self.initial_capital = initial_capital
         self.commission_rate = commission_rate
         self.slippage = slippage
+
+    def prepare_multi_factor_data(
+        self,
+        df: pd.DataFrame,
+        factor_names: List[str],
+        weights: Optional[List[float]] = None,
+        method: str = "equal_weight",
+    ) -> pd.DataFrame:
+        """根据多个因子构建组合得分列。"""
+        prepared_df = df.copy()
+
+        if not isinstance(prepared_df.index, pd.DatetimeIndex):
+            if "date" in prepared_df.columns:
+                prepared_df = prepared_df.set_index("date")
+            prepared_df.index = pd.to_datetime(prepared_df.index)
+
+        normalized_factors = []
+        available_factor_names = []
+        for factor_name in factor_names:
+            if factor_name not in prepared_df.columns:
+                continue
+
+            normalized_name = f"{factor_name}_normalized"
+            factor_mean = prepared_df[factor_name].mean()
+            factor_std = prepared_df[factor_name].std()
+            if factor_std and not np.isnan(factor_std):
+                prepared_df[normalized_name] = (
+                    prepared_df[factor_name] - factor_mean
+                ) / factor_std
+            else:
+                prepared_df[normalized_name] = 0.0
+            normalized_factors.append(normalized_name)
+            available_factor_names.append(factor_name)
+
+        if not normalized_factors:
+            raise ValueError("没有可用于构建组合得分的有效因子列")
+
+        if weights is None:
+            if method == "equal_weight":
+                weights = [1.0 / len(normalized_factors)] * len(normalized_factors)
+            else:
+                prepared_df["returns"] = prepared_df["close"].pct_change().shift(-1)
+                factor_returns = {}
+                for factor_name, normalized_name in zip(available_factor_names, normalized_factors):
+                    aligned = pd.DataFrame(
+                        {
+                            "factor": prepared_df[normalized_name],
+                            "returns": prepared_df["returns"],
+                        }
+                    ).replace([np.inf, -np.inf], np.nan).dropna()
+
+                    if aligned.empty:
+                        continue
+
+                    factor_returns[factor_name] = aligned["factor"] * aligned["returns"]
+
+                factor_returns_df = pd.DataFrame(factor_returns).dropna(how="all")
+                if factor_returns_df.empty:
+                    raise ValueError("无法基于真实因子收益序列构建组合权重")
+
+                optimized = portfolio_analysis_service.optimize_weights(
+                    factor_returns=factor_returns_df,
+                    method=method,
+                )
+                if "error" in optimized:
+                    raise ValueError(optimized["error"])
+
+                weights = [
+                    optimized["weights"].get(factor_name, 0.0)
+                    for factor_name in available_factor_names
+                ]
+        elif len(weights) != len(normalized_factors):
+            raise ValueError("自定义权重数量与有效因子数量不匹配")
+
+        prepared_df["composite_score"] = sum(
+            prepared_df[nf] * w for nf, w in zip(normalized_factors, weights)
+        )
+
+        return prepared_df
 
     def single_factor_backtest(
         self,
@@ -64,6 +144,7 @@ class VectorBTBacktestService:
 
         # 1. 计算收益率
         df["returns"] = df["close"].pct_change()
+        df["forward_returns"] = df["close"].pct_change().shift(-1)
 
         # 2. 计算因子分位数（滚动窗口252天）
         factor_rank = df[factor_name].rolling(252, min_periods=1).rank(pct=True)
@@ -71,11 +152,15 @@ class VectorBTBacktestService:
         # 3. 生成分层信号
         percentile_threshold = percentile / 100.0
         if direction == "long":
-            entries = factor_rank >= percentile_threshold
-            exits = factor_rank < percentile_threshold  # 低于阈值时平仓
+            raw_entries = factor_rank >= percentile_threshold
+            raw_exits = factor_rank < percentile_threshold
         else:
-            entries = factor_rank <= percentile_threshold
-            exits = factor_rank > percentile_threshold  # 高于阈值时平仓
+            raw_entries = factor_rank <= percentile_threshold
+            raw_exits = factor_rank > percentile_threshold
+
+        # 因子在 t 日收盘后才可观测，交易信号需顺延到下一交易日执行
+        entries = raw_entries.shift(1, fill_value=False)
+        exits = raw_exits.shift(1, fill_value=False)
 
         # 4. 计算各层收益
         quantile_returns = {}
@@ -83,7 +168,7 @@ class VectorBTBacktestService:
             q_min = q / n_quantiles
             q_max = (q + 1) / n_quantiles
             layer_mask = (factor_rank >= q_min) & (factor_rank < q_max)
-            layer_returns = df.loc[layer_mask, "returns"]
+            layer_returns = df.loc[layer_mask, "forward_returns"]
             quantile_returns[f"Q{q + 1}"] = layer_returns
 
         # 5. 创建回测结果（使用vectorbt的信号回测）
@@ -288,63 +373,12 @@ class VectorBTBacktestService:
                 df = df.set_index("date")
             df.index = pd.to_datetime(df.index)
 
-        # 1. 标准化因子值（z-score）
-        for factor_name in factor_names:
-            if factor_name in df.columns:
-                factor_mean = df[factor_name].mean()
-                factor_std = df[factor_name].std()
-                if factor_std > 0:
-                    df[f"{factor_name}_normalized"] = (df[factor_name] - factor_mean) / factor_std
-                else:
-                    df[f"{factor_name}_normalized"] = 0
-
-        # 2. 计算因子组合得分
-        normalized_factors = [f"{name}_normalized" for name in factor_names]
-
-        if method == "equal_weight":
-            # 等权重
-            if weights is None:
-                weights = [1.0 / len(normalized_factors)] * len(normalized_factors)
-            df["composite_score"] = sum(df[nf] * w for nf, w in zip(normalized_factors, weights))
-
-        elif method == "ic_weight":
-            # IC加权（简化版：使用因子与收益的相关性作为权重）
-            df["returns"] = df["close"].pct_change().shift(-1)
-            ic_weights = []
-            for factor_name in factor_names:
-                norm_factor = f"{factor_name}_normalized"
-                ic = df[[norm_factor, "returns"]].dropna().corr().iloc[0, 1]
-                ic_weights.append(abs(ic) if not np.isnan(ic) else 1.0)
-
-            # 归一化权重
-            total_ic_weight = sum(ic_weights)
-            if total_ic_weight > 0:
-                ic_weights = [w / total_ic_weight for w in ic_weights]
-            else:
-                ic_weights = [1.0 / len(normalized_factors)] * len(normalized_factors)
-
-            df["composite_score"] = sum(df[nf] * w for nf, w in zip(normalized_factors, ic_weights))
-
-        elif method == "risk_parity":
-            # 风险平价（简化版：使用因子波动率的倒数作为权重）
-            vol_weights = []
-            for factor_name in factor_names:
-                norm_factor = f"{factor_name}_normalized"
-                vol = df[norm_factor].std()
-                vol_weights.append(1.0 / vol if vol > 0 else 1.0)
-
-            # 归一化权重
-            total_vol_weight = sum(vol_weights)
-            if total_vol_weight > 0:
-                vol_weights = [w / total_vol_weight for w in vol_weights]
-            else:
-                vol_weights = [1.0 / len(normalized_factors)] * len(normalized_factors)
-
-            df["composite_score"] = sum(df[nf] * w for nf, w in zip(normalized_factors, vol_weights))
-
-        else:
-            # 默认等权重
-            df["composite_score"] = df[normalized_factors].mean(axis=1)
+        df = self.prepare_multi_factor_data(
+            df=df,
+            factor_names=factor_names,
+            weights=weights,
+            method=method,
+        )
 
         # 3. 使用组合得分进行回测
         return self.single_factor_backtest(
@@ -387,8 +421,6 @@ class VectorBTBacktestService:
         price_df.index = pd.to_datetime(price_df.index)
 
         # 1. 计算收益率
-        returns_df = price_df.pct_change()
-
         # 2. 每日选择股票（横截面排名）
         selected_stocks = {}
         for date in factor_df.index:
@@ -406,24 +438,31 @@ class VectorBTBacktestService:
 
             selected_stocks[date] = selected
 
-        # 3. 创建信号矩阵
-        # 只有被选中的股票在该日期持有
-        signals = pd.DataFrame(0, index=returns_df.index, columns=returns_df.columns)
+        # 3. 创建目标持仓矩阵
+        target_positions = pd.DataFrame(
+            False,
+            index=price_df.index,
+            columns=price_df.columns,
+        )
 
         for date, selected in selected_stocks.items():
-            if selected:  # 确保有股票被选中
-                signals.loc[date, selected] = 1
+            if selected:
+                target_positions.loc[date, selected] = True
+
+        # 横截面因子在 t 日收盘后观测，t+1 日起生效
+        holdings = target_positions.shift(1, fill_value=False).astype(bool)
+        previous_holdings = holdings.shift(1, fill_value=False).astype(bool)
+        entries = holdings & ~previous_holdings
+        exits = ~holdings & previous_holdings
 
         # 4. 使用vectorbt进行回测
-        # 注意：vectorbt的entries表示持仓开始，exits表示持仓结束
-        # 这里我们简化处理：每日调仓，所以entries=signals，exits=signals.shift(-1)
         pf = vbt.Portfolio.from_signals(
             close=price_df,
-            entries=signals,
-            exits=signals.shift(-1).fillna(0),
+            entries=entries,
+            exits=exits,
             init_cash=self.initial_capital,
             freq="D",
-            cash_sharing=False,
+            cash_sharing=True,
             fees=self.commission_rate,  # 手续费率
             slippage=self.slippage,  # 滑点率
         )
@@ -434,7 +473,7 @@ class VectorBTBacktestService:
         returns_clean = returns.dropna()
 
         # 使用 VectorBT 的 stats() 方法获取所有指标
-        stats = pf.stats()
+        stats = pf.stats(agg_func=np.mean)
 
         # 从 stats Series 中提取指标
         # VectorBT 返回的百分比值需要除以100转换为小数
@@ -569,6 +608,10 @@ class VectorBTBacktestService:
             "trades_count": trades_count,
             "trades": trades_df,
             "daily_selected_count": trades_count,
+            "selection_by_date": {
+                pd.Timestamp(date).strftime("%Y-%m-%d"): selected
+                for date, selected in selected_stocks.items()
+            },
             # 手动计算的指标
             "total_return": float(total_return),
             "annual_return": float(annual_return),

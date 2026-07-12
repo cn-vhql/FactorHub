@@ -6,6 +6,7 @@ import {
   Space,
   Tag,
   Spin,
+  Alert,
   message,
   Row,
   Col,
@@ -18,11 +19,15 @@ import {
   Divider,
   Tabs,
   Progress,
-  Tooltip
+  Tooltip,
+  Typography
 } from 'antd'
 import {
   ArrowLeftOutlined,
   ReloadOutlined,
+  RobotOutlined,
+  DownloadOutlined,
+  StopOutlined,
   LineChartOutlined,
   EditOutlined,
   DeleteOutlined,
@@ -31,9 +36,18 @@ import {
   FundOutlined,
   QuestionCircleOutlined
 } from '@ant-design/icons'
-import { WarningOutlined } from '@ant-design/icons'
-import * as echarts from 'echarts'
+import * as echarts from '@/utils/echarts'
 import { api } from '@/services/api'
+import CodeTextArea from '@/components/CodeTextArea'
+import MarkdownReportViewer from '@/components/MarkdownReportViewer'
+import {
+  FORMULA_EMPTY_MESSAGE,
+  FORMULA_FIELD_LABEL,
+  FORMULA_TYPE_OPTIONS,
+  getFormulaHelpContent,
+  getFormulaPlaceholder,
+  normalizeFormulaType,
+} from '@/utils/formula'
 import './FactorDetail.css'
 import dayjs from 'dayjs'
 
@@ -47,6 +61,7 @@ interface FactorDetail {
   category: string
   source: 'preset' | 'user'
   description?: string
+  formula_type?: string
   is_active?: boolean
   created_at?: string
   updated_at?: string
@@ -72,7 +87,26 @@ interface ChartData {
   factor: {
     dates: string[]
     values: number[]
+    plotSeries?: Array<{
+      name: string
+      dates: string[]
+      values: number[]
+      renderType?: 'line' | 'bar'
+    }>
+    formulaType?: string
   }
+}
+
+const PLOT_SERIES_COLORS = ['#3b82f6', '#f59e0b', '#10b981', '#ef4444', '#8b5cf6', '#06b6d4']
+
+const getPlotSeriesColor = (index: number) => PLOT_SERIES_COLORS[index % PLOT_SERIES_COLORS.length]
+
+const alignValuesToDates = (
+  dates: string[],
+  series: { dates: string[]; values: number[] }
+): Array<number | null> => {
+  const valueMap = new Map(series.dates.map((date, index) => [date, series.values[index] ?? null]))
+  return dates.map((date) => valueMap.get(date) ?? null)
 }
 
 // 信息提示组件
@@ -84,108 +118,6 @@ const InfoTooltip: React.FC<{ title: string; content: string }> = ({ title, cont
     </span>
   </Tooltip>
 )
-
-// 公式类型帮助内容（用于Tooltip）
-const getFormulaHelpContent = (formulaType: string) => {
-  if (formulaType === 'expression') {
-    return (
-      <div style={{ maxWidth: '500px', fontSize: '12px', color: '#fff' }}>
-        <div style={{ marginBottom: '12px' }}>
-          <div style={{ fontWeight: 600, marginBottom: '6px', fontSize: '13px', color: '#fff' }}>表达式类型因子</div>
-          <p style={{ margin: 0, color: '#ccc', lineHeight: '1.6' }}>使用 pandas 链式语法编写因子表达式</p>
-        </div>
-        <div style={{ marginBottom: '12px', paddingBottom: '12px', borderBottom: '1px solid #444' }}>
-          <div style={{ fontWeight: 600, marginBottom: '6px', fontSize: '13px', color: '#fff' }}>可用字段</div>
-          <code style={{ background: 'rgba(255, 255, 255, 0.1)', color: '#4dabf7', padding: '2px 6px', borderRadius: '4px', fontFamily: 'monospace', fontSize: '12px' }}>close, open, high, low, volume, amount</code>
-        </div>
-        <div style={{ marginBottom: '12px', paddingBottom: '12px', borderBottom: '1px solid #444' }}>
-          <div style={{ fontWeight: 600, marginBottom: '6px', fontSize: '13px', color: '#fff' }}>常用函数</div>
-          <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>rolling(n).mean()</code> - n日移动平均</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>rolling(n).std()</code> - n日标准差</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>rolling(n).max()</code> / <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>rolling(n).min()</code> - n日最大/最小值</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>shift(n)</code> - 向前移n行</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>diff()</code> - 一阶差分</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>pct_change()</code> - 百分比变化</li>
-          </ul>
-        </div>
-        <div>
-          <div style={{ fontWeight: 600, marginBottom: '6px', fontSize: '13px', color: '#fff' }}>示例</div>
-          <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>close.rolling(20).mean()</code> - 20日均线</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>close / close.rolling(20).mean()</code> - 相对20日均线</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>close.pct_change(5)</code> - 5日收益率</li>
-          </ul>
-        </div>
-      </div>
-    )
-  } else {
-    return (
-      <div style={{ maxWidth: '600px', fontSize: '12px', color: '#fff' }}>
-        <div style={{ marginBottom: '12px' }}>
-          <div style={{ fontWeight: 600, marginBottom: '6px', fontSize: '13px', color: '#fff' }}>函数类型因子</div>
-          <p style={{ margin: 0, color: '#ccc', lineHeight: '1.6' }}>支持预定义函数和自定义def函数两种写法</p>
-        </div>
-        <div style={{ marginBottom: '12px', paddingBottom: '12px', borderBottom: '1px solid #444' }}>
-          <div style={{ fontWeight: 600, marginBottom: '6px', fontSize: '13px', color: '#fff' }}>方式一：预定义函数</div>
-          <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>RSI(close, 14)</code> - 14日RSI</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>MACD(close, 12, 26, 9)[0]</code> - MACD快线</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>EMA(close, 20)</code> - 20日指数移动平均</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>SMA(close, 60)</code> / <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>MA(close, 60)</code> - 简单移动平均</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>BOLL(close, 20, 2)</code> - 布林带上轨</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>KDJ(high, low, close, 9, 3, 3)[0]</code> - KDJ的K值</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>ATR(high, low, close, 14)</code> - 14日ATR</li>
-          </ul>
-        </div>
-        <div style={{ marginBottom: '12px', paddingBottom: '12px', borderBottom: '1px solid #444' }}>
-          <div style={{ fontWeight: 600, marginBottom: '6px', fontSize: '13px', color: '#fff' }}>方式二：自定义def函数</div>
-          <p style={{ margin: '0 0 8px 0', color: '#ccc', lineHeight: '1.6', fontSize: '12px' }}>使用Python def语法编写复杂逻辑（<WarningOutlined style={{ color: '#f59e0b' }} /> 函数名必须为 calculate_factor）</p>
-          <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <strong style={{ color: '#f59e0b' }}>函数名必须固定为：</strong><code style={{ color: '#f59e0b', background: 'rgba(245, 158, 11, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>def calculate_factor(df):</code></li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• 参数 <code style={{ color: '#4dabf7', background: 'rgba(255, 255, 255, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>df</code> 是包含 open/high/low/close/volume 的 DataFrame</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• 必须返回 Series 或可转换为 Series 的数组</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• 支持多行代码、条件判断、循环等复杂逻辑</li>
-            <li style={{ padding: '2px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>• <strong style={{ color: '#10b981' }}>✓ 完全兼容麦语言函数：</strong><code style={{ color: '#10b981', background: 'rgba(16, 185, 129, 0.1)', padding: '2px 4px', borderRadius: '3px' }}>REF, HHV, LLV, CROSS, IF, MA, SUM, STD</code> 等</li>
-          </ul>
-        </div>
-        <div>
-          <div style={{ fontWeight: 600, marginBottom: '6px', fontSize: '13px', color: '#fff' }}>def函数示例</div>
-          <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-            <li style={{ padding: '4px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>
-              <div style={{ marginBottom: '4px', color: '#ccc' }}>• 条件组合因子：</div>
-              <code style={{ display: 'block', color: '#4dabf7', background: 'rgba(0, 0, 0, 0.3)', padding: '6px 8px', borderRadius: '4px', fontSize: '11px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', marginTop: '4px' }}>def calculate_factor(df):
-    ma20 = df['close'].rolling(20).mean()
-    ma60 = df['close'].rolling(60).mean()
-    return (ma20 &gt; ma60).astype(int)</code>
-            </li>
-            <li style={{ padding: '4px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>
-              <div style={{ marginBottom: '4px', color: '#ccc' }}>• 使用麦语言函数：</div>
-              <code style={{ display: 'block', color: '#4dabf7', background: 'rgba(0, 0, 0, 0.3)', padding: '6px 8px', borderRadius: '4px', fontSize: '11px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', marginTop: '4px' }}>def calculate_factor(df):
-    ma5 = MA(df['close'], 5)
-    ma10 = MA(df['close'], 10)
-    return CROSS(ma5, ma10).astype(int)</code>
-            </li>
-            <li style={{ padding: '4px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>
-              <div style={{ marginBottom: '4px', color: '#ccc' }}>• 带条件判断的因子：</div>
-              <code style={{ display: 'block', color: '#4dabf7', background: 'rgba(0, 0, 0, 0.3)', padding: '6px 8px', borderRadius: '4px', fontSize: '11px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', marginTop: '4px' }}>def calculate_factor(df):
-    rsi = RSI(df['close'], 14)
-    return np.where(rsi &gt; 70, -1, np.where(rsi &lt; 30, 1, 0))</code>
-            </li>
-            <li style={{ padding: '4px 0', color: '#fff', fontSize: '12px', lineHeight: '1.6' }}>
-              <div style={{ marginBottom: '4px', color: '#ccc' }}>• 波动率加权因子：</div>
-              <code style={{ display: 'block', color: '#4dabf7', background: 'rgba(0, 0, 0, 0.3)', padding: '6px 8px', borderRadius: '4px', fontSize: '11px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', marginTop: '4px' }}>def calculate_factor(df):
-    ret = df['close'].pct_change()
-    vol = ret.rolling(20).std()
-    signal = (df['close'] &gt; df['close'].shift(1)).astype(int)
-    return signal * vol</code>
-            </li>
-          </ul>
-        </div>
-      </div>
-    )
-  }
-}
 
 const FactorDetail: React.FC = () => {
   const [searchParams] = useSearchParams()
@@ -228,6 +160,15 @@ const FactorDetail: React.FC = () => {
   const [monitoringData, setMonitoringData] = useState<any>(null)
   const [loadingAnalysisTabs, setLoadingAnalysisTabs] = useState(false)
   const [activeTabKey, setActiveTabKey] = useState<string>('chart')
+  const [aiReportMarkdown, setAiReportMarkdown] = useState<string>('')
+  const [aiAnalysisLoading, setAiAnalysisLoading] = useState(false)
+  const [aiAnalysisError, setAiAnalysisError] = useState<string>('')
+  const [aiAnalysisMeta, setAiAnalysisMeta] = useState<{
+    model?: string
+    requestUrl?: string
+    factorName?: string
+    generatedAt?: string
+  } | null>(null)
 
   // 图表容器引用
   const distributionChartRef = useRef<HTMLDivElement>(null)
@@ -242,8 +183,6 @@ const FactorDetail: React.FC = () => {
   const icTimeSeriesChartRef = useRef<HTMLDivElement>(null)
   const eventResponseChartRef = useRef<HTMLDivElement>(null)
   const decayCurveChartRef = useRef<HTMLDivElement>(null)
-  const alphaBetaChartRef = useRef<HTMLDivElement>(null)
-  const returnDecompositionChartRef = useRef<HTMLDivElement>(null)
   const rollingBandChartRef = useRef<HTMLDivElement>(null)
   const transitionMatrixRef = useRef<HTMLDivElement>(null)
   const structuralBreakChartRef = useRef<HTMLDivElement>(null)
@@ -251,6 +190,9 @@ const FactorDetail: React.FC = () => {
 
   // 图表实例
   const chartsRef = useRef<Record<string, echarts.ECharts>>({})
+  const aiAnalysisAbortRef = useRef<AbortController | null>(null)
+  const aiReportBufferRef = useRef('')
+  const aiReportFlushTimerRef = useRef<number | null>(null)
 
   // 加载因子详情
   const loadFactorDetail = useCallback(async () => {
@@ -355,7 +297,7 @@ const FactorDetail: React.FC = () => {
       category: factor.category,
       description: factor.description || '',
       code: factor.code,
-      formula_type: (factor as any).formula_type || 'expression'
+      formula_type: normalizeFormulaType(factor.formula_type)
     })
     setEditing(true)
   }
@@ -369,11 +311,11 @@ const FactorDetail: React.FC = () => {
     try {
       const validateResponse = await api.validateFactor({
         code: editForm.code,
-        formula_type: 'expression'
+        formula_type: normalizeFormulaType(editForm.formula_type)
       } as any) as any
 
       if (!validateResponse.success) {
-        message.error('因子公式验证失败')
+        message.error(validateResponse.message || '因子表达式验证失败')
         return
       }
 
@@ -381,7 +323,8 @@ const FactorDetail: React.FC = () => {
         name: editForm.name,
         category: editForm.category,
         description: editForm.description,
-        code: editForm.code
+        code: editForm.code,
+        formula_type: normalizeFormulaType(editForm.formula_type),
       } as any) as any
 
       if (updateResponse.success) {
@@ -403,19 +346,19 @@ const FactorDetail: React.FC = () => {
 
   const handleValidateFormula = async () => {
     if (!editForm.code) {
-      message.warning('请先输入因子代码')
+      message.warning(FORMULA_EMPTY_MESSAGE)
       return
     }
 
     try {
       const response = await api.validateFactor({
         code: editForm.code,
-        formula_type: editForm.formula_type || 'expression'
+        formula_type: normalizeFormulaType(editForm.formula_type)
       } as any) as any
       if (response.success) {
-        message.success('公式验证通过')
+        message.success(response.message || '验证通过')
       } else {
-        message.error(response.message || '公式验证失败')
+        message.error(response.message || '验证失败')
       }
     } catch (error) {
       message.error('验证失败')
@@ -896,7 +839,6 @@ const FactorDetail: React.FC = () => {
     console.log('drawScatterChart: scatterData', scatterData)
     const x = scatterData.x || []
     const y = scatterData.y || []
-    const correlation = scatterData.correlation || 0
     console.log('drawScatterChart: x, y lengths', { xLength: x.length, yLength: y.length })
 
     const option: echarts.EChartsOption = {
@@ -1527,8 +1469,6 @@ const FactorDetail: React.FC = () => {
     const displayPowers = powers.slice(0, halfLen)
 
     // 转换频率为周期（天数）
-    const periods = displayFreqs.map((f: number) => (f > 0 ? 1 / f : 0))
-
     const option: echarts.EChartsOption = {
       title: {
         text: '功率谱（频域分析）',
@@ -1625,6 +1565,304 @@ const FactorDetail: React.FC = () => {
     return startDate.toISOString().split('T')[0]
   }
 
+  const resolveCurrentDateRange = useCallback(() => {
+    if (chartPeriod === 'custom') {
+      if (!customStartDate || !customEndDate) {
+        throw new Error('请先选择自定义日期范围')
+      }
+      return {
+        startDate: customStartDate,
+        endDate: customEndDate,
+      }
+    }
+
+    return {
+      startDate: getStartDateByPeriod(chartPeriod),
+      endDate: new Date().toISOString().split('T')[0],
+    }
+  }, [chartPeriod, customStartDate, customEndDate])
+
+  const buildAiAnalysisContext = useCallback(() => {
+    const plotSeries = chartData?.factor.plotSeries ?? []
+    return {
+      ic_analysis: analysisData,
+      exposure_analysis: exposureData,
+      effectiveness_analysis: effectivenessData,
+      attribution_analysis: attributionData,
+      monitoring_analysis: monitoringData,
+      chart_summary: chartData ? {
+        chart_start_date: chartData.stock[0]?.date ?? null,
+        chart_end_date: chartData.stock[chartData.stock.length - 1]?.date ?? null,
+        stock_points: chartData.stock.length,
+        latest_close: chartData.stock[chartData.stock.length - 1]?.close ?? null,
+        factor_points: chartData.factor.values.length,
+        latest_factor_value: chartData.factor.values[chartData.factor.values.length - 1] ?? null,
+        formula_type: chartData.factor.formulaType ?? factor?.formula_type ?? null,
+        plot_series_names: plotSeries.map((series) => series.name),
+      } : null,
+    }
+  }, [analysisData, exposureData, effectivenessData, attributionData, monitoringData, chartData, factor?.formula_type])
+
+  const stopAIInterpretation = useCallback(() => {
+    if (aiAnalysisAbortRef.current) {
+      aiAnalysisAbortRef.current.abort()
+      aiAnalysisAbortRef.current = null
+    }
+    if (aiReportFlushTimerRef.current !== null) {
+      window.clearTimeout(aiReportFlushTimerRef.current)
+      aiReportFlushTimerRef.current = null
+    }
+    setAiAnalysisLoading(false)
+  }, [])
+
+  const flushAiReportBuffer = useCallback((force = false) => {
+    if (!force && !aiReportBufferRef.current) {
+      return
+    }
+
+    if (aiReportFlushTimerRef.current !== null) {
+      window.clearTimeout(aiReportFlushTimerRef.current)
+      aiReportFlushTimerRef.current = null
+    }
+
+    const pendingContent = aiReportBufferRef.current
+    if (!pendingContent) {
+      return
+    }
+
+    aiReportBufferRef.current = ''
+    setAiReportMarkdown((previous) => previous + pendingContent)
+  }, [])
+
+  const enqueueAiReportChunk = useCallback((chunk: string) => {
+    if (!chunk) {
+      return
+    }
+
+    aiReportBufferRef.current += chunk
+    if (aiReportFlushTimerRef.current !== null) {
+      return
+    }
+
+    aiReportFlushTimerRef.current = window.setTimeout(() => {
+      flushAiReportBuffer(true)
+    }, 80)
+  }, [flushAiReportBuffer])
+
+  const exportAIReport = useCallback(() => {
+    if (!aiReportMarkdown.trim()) {
+      message.warning('当前没有可导出的 AI 分析报告')
+      return
+    }
+
+    const timestamp = dayjs().format('YYYYMMDD_HHmmss')
+    const safeName = (factor?.name || 'factor_report').replace(/[\\/:*?"<>|]/g, '_')
+    const header = [
+      `# ${factor?.name || '因子'} AI 分析报告`,
+      '',
+      `- 生成时间：${dayjs(aiAnalysisMeta?.generatedAt || new Date().toISOString()).format('YYYY-MM-DD HH:mm:ss')}`,
+      `- 因子分类：${factor?.category || '-'}`,
+      `- 股票代码：${stockCode}`,
+      '',
+    ].join('\n')
+    const content = `${header}\n${aiReportMarkdown}`.trim()
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${safeName}_ai_analysis_${timestamp}.md`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+  }, [aiReportMarkdown, aiAnalysisMeta?.generatedAt, factor?.category, factor?.name, stockCode])
+
+  const startAIInterpretation = useCallback(async () => {
+    if (!factor) {
+      message.warning('因子详情尚未加载完成')
+      return
+    }
+
+    if (!analysisData && !exposureData && !effectivenessData && !attributionData && !monitoringData) {
+      message.warning('请先点击“分析因子”获取分析结果后，再进行 AI 解读')
+      return
+    }
+
+    let dateRange: { startDate: string; endDate: string }
+    try {
+      dateRange = resolveCurrentDateRange()
+    } catch (error) {
+      message.warning((error as Error).message)
+      return
+    }
+
+    stopAIInterpretation()
+    const controller = new AbortController()
+    aiAnalysisAbortRef.current = controller
+    aiReportBufferRef.current = ''
+    if (aiReportFlushTimerRef.current !== null) {
+      window.clearTimeout(aiReportFlushTimerRef.current)
+      aiReportFlushTimerRef.current = null
+    }
+    setAiAnalysisLoading(true)
+    setAiAnalysisError('')
+    setAiReportMarkdown('')
+    setAiAnalysisMeta(null)
+
+    try {
+      const response = await fetch('/api/ai/interpret-factor/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+        },
+        body: JSON.stringify({
+          factor: {
+            id: factor.id,
+            name: factor.name,
+            category: factor.category,
+            description: factor.description,
+            formula_type: factor.formula_type,
+            code: factor.code,
+          },
+          stock_code: stockCode,
+          start_date: dateRange.startDate,
+          end_date: dateRange.endDate,
+          chart_period: chartPeriod,
+          analysis_context: buildAiAnalysisContext(),
+        }),
+        signal: controller.signal,
+      })
+
+      if (!response.ok || !response.body) {
+        const errorText = await response.text()
+        let detail = errorText || `AI 解读请求失败 (${response.status})`
+        try {
+          const parsed = JSON.parse(errorText)
+          detail = parsed.detail || parsed.message || detail
+        } catch {
+          // ignore JSON parse error
+        }
+        throw new Error(detail)
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder('utf-8')
+      let buffer = ''
+      let shouldStop = false
+
+      const processSseEvent = (rawEvent: string) => {
+        const dataLine = rawEvent
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trim())
+          .join('\n')
+
+        if (!dataLine) {
+          return
+        }
+
+        let eventPayload: any
+        try {
+          eventPayload = JSON.parse(dataLine)
+        } catch {
+          return
+        }
+
+        if (eventPayload.type === 'metadata') {
+          setAiAnalysisMeta({
+            model: eventPayload.model,
+            requestUrl: eventPayload.request_url,
+            factorName: eventPayload.factor_name,
+            generatedAt: new Date().toISOString(),
+          })
+          return
+        }
+
+        if (eventPayload.type === 'chunk') {
+          enqueueAiReportChunk(eventPayload.content || '')
+          return
+        }
+
+        if (eventPayload.type === 'error') {
+          throw new Error(eventPayload.message || 'AI 解读流式输出失败')
+        }
+
+        if (eventPayload.type === 'done') {
+          flushAiReportBuffer(true)
+          shouldStop = true
+        }
+      }
+
+      const processBuffer = (isFinal = false) => {
+        while (true) {
+          const separatorMatch = buffer.match(/\r?\n\r?\n/)
+          if (!separatorMatch || separatorMatch.index === undefined) {
+            break
+          }
+
+          const separatorIndex = separatorMatch.index
+          const rawEvent = buffer.slice(0, separatorIndex)
+          buffer = buffer.slice(separatorIndex + separatorMatch[0].length)
+
+          if (!rawEvent.trim()) {
+            continue
+          }
+
+          processSseEvent(rawEvent)
+          if (shouldStop) {
+            return
+          }
+        }
+
+        if (isFinal && buffer.trim()) {
+          processSseEvent(buffer)
+          buffer = ''
+        }
+      }
+
+      while (!shouldStop) {
+        const { value, done } = await reader.read()
+        if (done) {
+          buffer += decoder.decode()
+          processBuffer(true)
+          break
+        }
+
+        buffer += decoder.decode(value, { stream: true })
+        processBuffer()
+      }
+    } catch (error) {
+      if ((error as Error).name === 'AbortError') {
+        flushAiReportBuffer(true)
+        setAiAnalysisError('AI 解读已停止')
+        return
+      }
+      flushAiReportBuffer(true)
+      const errorMessage = (error as Error).message || 'AI 解读失败'
+      setAiAnalysisError(errorMessage)
+      message.error(errorMessage)
+    } finally {
+      flushAiReportBuffer(true)
+      aiAnalysisAbortRef.current = null
+      setAiAnalysisLoading(false)
+    }
+  }, [
+    factor,
+    analysisData,
+    exposureData,
+    effectivenessData,
+    attributionData,
+    monitoringData,
+    resolveCurrentDateRange,
+    stopAIInterpretation,
+    stockCode,
+    chartPeriod,
+    buildAiAnalysisContext,
+    enqueueAiReportChunk,
+    flushAiReportBuffer,
+  ])
+
   // 处理股票代码变化
   const handleStockCodeChange = (value: string) => {
     // 移除可能存在的后缀
@@ -1720,7 +1958,16 @@ const FactorDetail: React.FC = () => {
 
       const factorData = {
         dates: factorDataMap.dates,
-        values: factorDataMap.factor_values
+        values: factorDataMap.factor_values,
+        plotSeries: Array.isArray(factorDataMap.plot_series)
+          ? factorDataMap.plot_series.map((series: any) => ({
+            name: series.name,
+            dates: Array.isArray(series.dates) ? series.dates : [],
+            values: Array.isArray(series.values) ? series.values : [],
+            renderType: series.render_type === 'bar' ? 'bar' : 'line'
+          }))
+          : undefined,
+        formulaType: factorDataMap.formula_type
       }
 
       setChartData({
@@ -1823,20 +2070,61 @@ const FactorDetail: React.FC = () => {
 
     const { stock, factor } = chartData
 
-    const stockDates = new Set(stock.map(s => s.date))
-    const alignedDates = factor.dates.filter((d: string) => stockDates.has(d))
-
-    const stockMap = new Map(stock.map(s => [s.date, s]))
-    const factorMap = new Map(factor.dates.map((d: string, i: number) => [d, factor.values[i]]))
-
-    const displayDates = alignedDates
-    const displayStock = alignedDates.map(d => stockMap.get(d)!).filter(Boolean)
-    const displayFactorValues = alignedDates.map(d => factorMap.get(d)!).filter((v: any) => v !== null && v !== undefined)
+    const displayDates = stock.map((item) => item.date)
+    const displayStock = stock
+    const primaryFactorValues = alignValuesToDates(displayDates, factor)
+    const visualSeries = factor.plotSeries && factor.plotSeries.length > 0
+      ? factor.plotSeries
+      : [
+        {
+          name: '因子值',
+          dates: factor.dates,
+          values: factor.values,
+          renderType: 'line' as const
+        }
+      ]
+    const alignedPlotSeries = visualSeries.map((series, index) => ({
+      ...series,
+      color: getPlotSeriesColor(index),
+      alignedValues: alignValuesToDates(displayDates, series)
+    }))
+    const hasMultiplePlotLines = alignedPlotSeries.length > 1
 
     const klineData = displayStock.map(d => [d.open, d.close, d.low, d.high])
 
     // 双轴同图模式
     if (factorChartType === 'overlay') {
+      const overlaySeries = [
+        {
+          type: 'candlestick',
+          name: '日K线',
+          data: klineData,
+          yAxisIndex: 0,
+          itemStyle: {
+            color: '#ef4444',
+            color0: '#22c55e',
+            borderColor: '#ef4444',
+            borderColor0: '#22c55e'
+          }
+        },
+        ...alignedPlotSeries.map((series) => ({
+          type: series.renderType === 'bar' ? 'bar' : 'line',
+          name: series.name,
+          data: series.alignedValues,
+          yAxisIndex: 1,
+          smooth: series.renderType !== 'bar',
+          showSymbol: false,
+          barMaxWidth: series.renderType === 'bar' ? 12 : undefined,
+          lineStyle: series.renderType !== 'bar' ? {
+            color: series.color,
+            width: 2
+          } : undefined,
+          itemStyle: {
+            color: series.color
+          }
+        }))
+      ]
+
       const option: echarts.EChartsOption = {
         animation: false,
         grid: {
@@ -1859,14 +2147,14 @@ const FactorDetail: React.FC = () => {
                 result += `<div style="margin: 2px 0;">
                   <span style="display: inline-block; width: 10px; height: 10px; background: ${param.color}; border-radius: 50%; margin-right: 5px;"></span>
                   <span style="font-weight: bold;">日K线:</span>
-                  开:${data[1]?.toFixed(2)} 收:${data[2]?.toFixed(2)}
-                  低:${data[3]?.toFixed(2)} 高:${data[0]?.toFixed(2)}
+                  开:${data[0]?.toFixed(2)} 收:${data[1]?.toFixed(2)}
+                  低:${data[2]?.toFixed(2)} 高:${data[3]?.toFixed(2)}
                 </div>`
-              } else if (param.seriesName === '因子值') {
+              } else if (param.value !== null && param.value !== undefined && param.value !== '-') {
                 result += `<div style="margin: 2px 0;">
                   <span style="display: inline-block; width: 10px; height: 10px; background: ${param.color}; border-radius: 50%; margin-right: 5px;"></span>
-                  <span style="font-weight: bold; color: #3b82f6;">因子值:</span>
-                  ${param.value?.toFixed(4)}
+                  <span style="font-weight: bold; color: ${param.color};">${param.seriesName}:</span>
+                  ${Number(param.value).toFixed(4)}
                 </div>`
               }
             })
@@ -1914,35 +2202,7 @@ const FactorDetail: React.FC = () => {
             end: 100
           }
         ],
-        series: [
-          {
-            type: 'candlestick',
-            name: '日K线',
-            data: klineData,
-            yAxisIndex: 0,
-            itemStyle: {
-              color: '#ef4444',
-              color0: '#22c55e',
-              borderColor: '#ef4444',
-              borderColor0: '#22c55e'
-            }
-          },
-          {
-            type: 'line',
-            name: '因子值',
-            data: displayFactorValues,
-            yAxisIndex: 1,
-            smooth: true,
-            showSymbol: false,
-            lineStyle: {
-              color: '#3b82f6',
-              width: 2
-            },
-            itemStyle: {
-              color: '#3b82f6'
-            }
-          }
-        ]
+        series: overlaySeries
       }
 
       myChart.setOption(option, true)
@@ -1951,15 +2211,17 @@ const FactorDetail: React.FC = () => {
 
     // 单轴归一化模式
     if (factorChartType === 'normalized') {
-      // 归一化处理：首日为100，计算百分比变化
+      const baseFactor = primaryFactorValues.find((value) => value !== null && value !== undefined) ?? 1
       const basePrice = displayStock[0]?.close || 1
-      const baseFactor = displayFactorValues[0] || 1
 
-      const normalizedPrices = displayStock.map((d, i) =>
-        ((d.close - basePrice) / basePrice * 100).toFixed(2)
+      const normalizedPrices = displayStock.map((d) =>
+        Number(((d.close - basePrice) / basePrice * 100).toFixed(2))
       )
-      const normalizedFactors = displayFactorValues.map((v: any, i: number) =>
-        ((v - baseFactor) / Math.abs(baseFactor) * 100).toFixed(2)
+      const factorDenominator = Math.abs(baseFactor) > 1e-12 ? Math.abs(baseFactor) : 1
+      const normalizedFactors = primaryFactorValues.map((value) =>
+        value === null || value === undefined
+          ? null
+          : Number((((value - baseFactor) / factorDenominator) * 100).toFixed(2))
       )
 
       const option: echarts.EChartsOption = {
@@ -1979,7 +2241,10 @@ const FactorDetail: React.FC = () => {
             let result = `<div style="font-weight: bold; margin-bottom: 5px;">${date}</div>`
 
             params.forEach((param: any) => {
-              const value = parseFloat(param.value).toFixed(2)
+              if (param.value === null || param.value === undefined || param.value === '-') {
+                return
+              }
+              const value = Number(param.value).toFixed(2)
               result += `<div style="margin: 2px 0;">
                 <span style="display: inline-block; width: 10px; height: 10px; background: ${param.color}; border-radius: 50%; margin-right: 5px;"></span>
                 <span style="font-weight: bold; color: ${param.color === '#ef4444' ? '#ef4444' : '#3b82f6'};">${param.seriesName}:</span>
@@ -1991,7 +2256,7 @@ const FactorDetail: React.FC = () => {
             const idx = params[0].dataIndex
             result += `<div style="margin-top: 5px; padding-top: 5px; border-top: 1px solid rgba(148, 163, 184, 0.2); font-size: 11px; color: #64748b;">
               原始价格: ${displayStock[idx]?.close?.toFixed(2)}<br/>
-              原始因子: ${displayFactorValues[idx]?.toFixed(4)}
+              主因子: ${primaryFactorValues[idx] == null ? '-' : Number(primaryFactorValues[idx]).toFixed(4)}
             </div>`
 
             return result
@@ -2048,7 +2313,7 @@ const FactorDetail: React.FC = () => {
           },
           {
             type: 'line',
-            name: '因子(归一化)',
+            name: '主因子(归一化)',
             data: normalizedFactors,
             smooth: true,
             showSymbol: false,
@@ -2068,6 +2333,51 @@ const FactorDetail: React.FC = () => {
     }
 
     // 分屏模式（折线图、柱状图、面积图）
+    const splitSeries = [
+      {
+        type: 'candlestick',
+        name: '日K线',
+        data: klineData,
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        itemStyle: {
+          color: '#ef4444',
+          color0: '#22c55e',
+          borderColor: '#ef4444',
+          borderColor0: '#22c55e'
+        }
+      },
+      ...alignedPlotSeries.map((series) => {
+        const seriesType = hasMultiplePlotLines
+          ? (series.renderType === 'bar' ? 'bar' : 'line')
+          : (factorChartType === 'bar' ? 'bar' : 'line')
+
+        return {
+          type: seriesType,
+          name: series.name,
+          data: series.alignedValues,
+          xAxisIndex: 1,
+          yAxisIndex: 1,
+          smooth: seriesType !== 'bar',
+          showSymbol: false,
+          barMaxWidth: seriesType === 'bar' ? 12 : undefined,
+          lineStyle: seriesType !== 'bar' ? {
+            color: series.color,
+            width: 2
+          } : undefined,
+          itemStyle: {
+            color: series.color
+          },
+          areaStyle: !hasMultiplePlotLines && factorChartType === 'area' && seriesType !== 'bar' ? {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: 'rgba(59, 130, 246, 0.3)' },
+              { offset: 1, color: 'rgba(59, 130, 246, 0.05)' }
+            ])
+          } : undefined
+        }
+      })
+    ]
+
     const option: echarts.EChartsOption = {
       animation: false,
       axisPointer: {
@@ -2088,20 +2398,20 @@ const FactorDetail: React.FC = () => {
           const date = params[0].axisValue
           let result = `<div style="font-weight: bold; margin-bottom: 5px;">${date}</div>`
 
-          params.forEach((param: any) => {
-            if (param.seriesName === '日K线') {
-              const data = param.data
-              result += `<div style="margin: 2px 0;">
+            params.forEach((param: any) => {
+              if (param.seriesName === '日K线') {
+                const data = param.data
+                result += `<div style="margin: 2px 0;">
                 <span style="display: inline-block; width: 10px; height: 10px; background: ${param.color}; border-radius: 50%; margin-right: 5px;"></span>
                 <span style="font-weight: bold;">日K线:</span>
-                开:${data[1]?.toFixed(2)} 收:${data[2]?.toFixed(2)}
-                低:${data[3]?.toFixed(2)} 高:${data[0]?.toFixed(2)}
+                开:${data[0]?.toFixed(2)} 收:${data[1]?.toFixed(2)}
+                低:${data[2]?.toFixed(2)} 高:${data[3]?.toFixed(2)}
               </div>`
-            } else if (param.seriesName === '因子值') {
+            } else if (param.value !== null && param.value !== undefined && param.value !== '-') {
               result += `<div style="margin: 2px 0;">
                 <span style="display: inline-block; width: 10px; height: 10px; background: ${param.color}; border-radius: 50%; margin-right: 5px;"></span>
-                <span style="font-weight: bold; color: #3b82f6;">因子值:</span>
-                ${param.value?.toFixed(4)}
+                <span style="font-weight: bold; color: ${param.color};">${param.seriesName}:</span>
+                ${Number(param.value).toFixed(4)}
               </div>`
             }
           })
@@ -2169,64 +2479,11 @@ const FactorDetail: React.FC = () => {
           end: 100
         }
       ],
-      series: [
-        {
-          type: 'candlestick',
-          name: '日K线',
-          data: klineData,
-          xAxisIndex: 0,
-          yAxisIndex: 0,
-          itemStyle: {
-            color: '#ef4444',
-            color0: '#22c55e',
-            borderColor: '#ef4444',
-            borderColor0: '#22c55e'
-          }
-        },
-        {
-          type: factorChartType === 'bar' ? 'bar' : 'line',
-          name: '因子值',
-          data: displayFactorValues,
-          xAxisIndex: 1,
-          yAxisIndex: 1,
-          smooth: factorChartType !== 'bar',
-          showSymbol: false,
-          lineStyle: factorChartType !== 'bar' ? {
-            color: '#3b82f6',
-            width: 2
-          } : undefined,
-          itemStyle: {
-            color: '#3b82f6'
-          },
-          areaStyle: factorChartType === 'area' ? {
-            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-              { offset: 0, color: 'rgba(59, 130, 246, 0.3)' },
-              { offset: 1, color: 'rgba(59, 130, 246, 0.05)' }
-            ])
-          } : undefined
-        }
-      ]
+      series: splitSeries
     }
 
     myChart.setOption(option, true)
   }, [chartData, factorChartType])
-
-  // 获取IC统计数据
-  const getICStats = () => {
-    if (!analysisData?.ic?.data?.ic_stats) {
-      return null
-    }
-
-    const stats = analysisData.ic.data.ic_stats
-    const factorNames = Object.keys(stats)
-
-    if (factorNames.length === 0) {
-      return null
-    }
-
-    const factorName = factorNames[0]
-    return stats[factorName] || null
-  }
 
   // 初始加载
   useEffect(() => {
@@ -2357,7 +2614,14 @@ const FactorDetail: React.FC = () => {
     }
   }, [])
 
-  const icStats = getICStats()
+  useEffect(() => {
+    return () => {
+      if (aiAnalysisAbortRef.current) {
+        aiAnalysisAbortRef.current.abort()
+        aiAnalysisAbortRef.current = null
+      }
+    }
+  }, [])
 
   return (
     <div className="factor-detail-container">
@@ -3343,6 +3607,96 @@ const FactorDetail: React.FC = () => {
                           )}
                         </>
                       )
+                    },
+                    {
+                      key: 'ai',
+                      label: 'AI分析',
+                      children: (
+                        <Row gutter={[16, 16]}>
+                          <Col xs={24}>
+                            <Card
+                              title="AI 解读"
+                              variant="borderless"
+                              extra={(
+                                <Space wrap>
+                                  {aiAnalysisLoading ? (
+                                    <Button icon={<StopOutlined />} onClick={stopAIInterpretation}>
+                                      停止生成
+                                    </Button>
+                                  ) : (
+                                    <Button type="primary" icon={<RobotOutlined />} onClick={startAIInterpretation}>
+                                      AI解读
+                                    </Button>
+                                  )}
+                                  <Button
+                                    icon={<DownloadOutlined />}
+                                    onClick={exportAIReport}
+                                    disabled={!aiReportMarkdown.trim()}
+                                  >
+                                    导出 MD 报告
+                                  </Button>
+                                </Space>
+                              )}
+                            >
+                              {!analysisData && !exposureData && !effectivenessData && !attributionData && !monitoringData ? (
+                                <div style={{ textAlign: 'center', padding: '60px 20px', color: '#64748b' }}>
+                                  <RobotOutlined style={{ fontSize: '48px', marginBottom: '16px' }} />
+                                  <p>请先点击“分析因子”获取分析结果，再进入 AI 分析。</p>
+                                </div>
+                              ) : (
+                                <>
+                                  <Alert
+                                    type="info"
+                                    showIcon
+                                    style={{ marginBottom: 16 }}
+                                    message="AI 将基于当前因子背景、所选股票与已加载的分析结果生成研究报告"
+                                    description="报告以 Markdown 实时流式输出，可直接导出为 .md 文件。"
+                                  />
+
+                                  {aiAnalysisMeta && (
+                                    <div style={{ marginBottom: 12, display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                                      <Tag color="blue">{aiAnalysisMeta.model || '已连接模型'}</Tag>
+                                      <Tag color="cyan">{aiAnalysisMeta.factorName || factor?.name}</Tag>
+                                      <Tag color="processing">{stockCode}</Tag>
+                                      {aiAnalysisMeta.generatedAt && (
+                                        <Tag color="default">{dayjs(aiAnalysisMeta.generatedAt).format('YYYY-MM-DD HH:mm:ss')}</Tag>
+                                      )}
+                                    </div>
+                                  )}
+
+                                  {aiAnalysisLoading && (
+                                    <div style={{ marginBottom: 16 }}>
+                                      <Spin size="small" />
+                                      <Typography.Text style={{ marginLeft: 8, color: '#475569' }}>
+                                        正在接收模型流式输出...
+                                      </Typography.Text>
+                                    </div>
+                                  )}
+
+                                  {aiAnalysisError && (
+                                    <Alert
+                                      type="error"
+                                      showIcon
+                                      style={{ marginBottom: 16 }}
+                                      message={aiAnalysisError}
+                                    />
+                                  )}
+
+                                  {aiReportMarkdown.trim() ? (
+                                    <div className="ai-analysis-report">
+                                      <MarkdownReportViewer content={aiReportMarkdown} />
+                                    </div>
+                                  ) : (
+                                    <div style={{ textAlign: 'center', padding: '48px 20px', color: '#64748b' }}>
+                                      {aiAnalysisLoading ? '模型正在生成报告，请稍候...' : '点击 “AI解读” 开始生成因子研究报告'}
+                                    </div>
+                                  )}
+                                </>
+                              )}
+                            </Card>
+                          </Col>
+                        </Row>
+                      )
                     }
                   ]}
                 />
@@ -3409,19 +3763,20 @@ const FactorDetail: React.FC = () => {
             style={{ marginBottom: 16 }}
           >
             <Select
-              value={editForm.formula_type || 'expression'}
-              onChange={(value) => setEditForm({ ...editForm, formula_type: value })}
+              value={normalizeFormulaType(editForm.formula_type)}
+              onChange={(value) => setEditForm({ ...editForm, formula_type: normalizeFormulaType(value) })}
             >
-              <Option value="expression">表达式</Option>
-              <Option value="function">函数</Option>
+              {FORMULA_TYPE_OPTIONS.map((option) => (
+                <Option key={option.value} value={option.value}>{option.label}</Option>
+              ))}
             </Select>
           </Form.Item>
 
           <Form.Item
             label={
               <Space>
-                <span>因子代码</span>
-                <Tooltip title={getFormulaHelpContent(editForm.formula_type || 'expression')} placement="right" styles={{ root: { maxWidth: '600px' } }}>
+                <span>{FORMULA_FIELD_LABEL}</span>
+                <Tooltip title={getFormulaHelpContent(normalizeFormulaType(editForm.formula_type))} placement="right" styles={{ root: { maxWidth: '600px' } }}>
                   <QuestionCircleOutlined style={{ color: '#1890ff', cursor: 'help' }} />
                 </Tooltip>
               </Space>
@@ -3429,22 +3784,12 @@ const FactorDetail: React.FC = () => {
             required
             style={{ marginBottom: 16 }}
           >
-            <Input.TextArea
+            <CodeTextArea
               value={editForm.code}
               onChange={(e) => setEditForm({ ...editForm, code: e.target.value })}
-              placeholder={editForm.formula_type === 'expression' ? '例如：close.rolling(20).mean()' : '例如：def calculate_factor(df):\n    return df["close"].rolling(20).mean()'}
+              placeholder={getFormulaPlaceholder(normalizeFormulaType(editForm.formula_type))}
               rows={6}
               className="font-mono"
-              style={{
-                backgroundColor: '#f6f8fa',
-                fontSize: '14px',
-                fontFamily: 'Consolas, Monaco, monospace',
-                borderRadius: '6px',
-                padding: '12px',
-                minHeight: '150px',
-                maxHeight: '300px',
-                overflowY: 'auto'
-              }}
             />
           </Form.Item>
 
@@ -3454,7 +3799,7 @@ const FactorDetail: React.FC = () => {
                 保存修改
               </Button>
               <Button onClick={handleValidateFormula}>
-                验证公式
+                验证表达式
               </Button>
             </Space>
           </Form.Item>

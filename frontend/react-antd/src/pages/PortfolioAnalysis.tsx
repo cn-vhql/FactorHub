@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
 import {
   Card,
   Form,
@@ -24,11 +23,17 @@ import {
   RocketOutlined,
   BarChartOutlined,
   LineChartOutlined,
-  ThunderboltOutlined,
-  SyncOutlined
+  ThunderboltOutlined
 } from '@ant-design/icons'
 import { AimOutlined, BulbOutlined } from '@ant-design/icons'
-import * as echarts from 'echarts'
+import * as echarts from '@/utils/echarts'
+import {
+  buildCompositeFactorDescription,
+  extractErrorMessage,
+  FACTOR_COPY,
+  formatActionFailure,
+  formatActionSuccess
+} from '@/utils/factorCopy'
 import axios from 'axios'
 import dayjs from 'dayjs'
 import './PortfolioAnalysis.css'
@@ -48,6 +53,7 @@ interface Factor {
 interface OptimizationResult {
   weights: Record<string, number>
   method: string
+  stock_code?: string
   factors: string[]
   metrics: {
     return: number
@@ -71,8 +77,135 @@ interface OptimizationResult {
   }
 }
 
+const METHOD_LABELS: Record<string, string> = {
+  equal_weight: '等权重',
+  ic_weight: 'IC加权',
+  ir_weight: 'IR加权',
+  max_sharpe: '最大夏普',
+  max_return: '最大收益',
+  min_variance: '最小方差'
+}
+
+const stripDfPrefixes = (code: string) => code
+  .replace(/df\[['"]open['"]\]/g, 'open')
+  .replace(/df\[['"]high['"]\]/g, 'high')
+  .replace(/df\[['"]low['"]\]/g, 'low')
+  .replace(/df\[['"]close['"]\]/g, 'close')
+  .replace(/df\[['"]volume['"]\]/g, 'volume')
+  .replace(/df\[['"]amount['"]\]/g, 'amount')
+
+const looksLikeMyLanguageProgram = (code: string) =>
+  code.includes(':=') || /(^|[;\n])\s*[A-Za-z_][A-Za-z0-9_]*\s*:/.test(code)
+
+const replaceVariable = (expression: string, variableName: string, replacement: string) =>
+  expression.replace(
+    new RegExp(`(?<![A-Za-z0-9_])${variableName}(?![A-Za-z0-9_])`, 'g'),
+    `(${replacement})`
+  )
+
+const normalizeMyLanguageExpression = (
+  expression: string,
+  assignments: Record<string, string>
+) => {
+  let normalized = expression.trim()
+  let changed = true
+  let safetyCounter = 0
+
+  while (changed && safetyCounter < 20) {
+    changed = false
+    safetyCounter += 1
+    Object.entries(assignments).forEach(([name, value]) => {
+      const replaced = replaceVariable(normalized, name, value)
+      if (replaced !== normalized) {
+        normalized = replaced
+        changed = true
+      }
+    })
+  }
+
+  return normalized
+}
+
+const extractMyLanguagePrimaryExpression = (code: string): string | null => {
+  if (!looksLikeMyLanguageProgram(code)) {
+    return null
+  }
+
+  const statements = code
+    .split(/[;\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+
+  const assignments: Record<string, string> = {}
+  const outputs: Array<{ name: string; expression: string }> = []
+  let lastExpression: string | null = null
+
+  statements.forEach((statement) => {
+    const match = statement.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(:=|:)\s*(.+)$/)
+    if (!match) {
+      lastExpression = normalizeMyLanguageExpression(statement, assignments)
+      return
+    }
+
+    const [, rawName, operator, rawExpression] = match
+    const normalizedExpression = normalizeMyLanguageExpression(rawExpression, assignments)
+    assignments[rawName] = normalizedExpression
+    assignments[rawName.toUpperCase()] = normalizedExpression
+    lastExpression = normalizedExpression
+
+    if (operator === ':') {
+      outputs.push({ name: rawName, expression: normalizedExpression })
+    }
+  })
+
+  const xgOutput = outputs.find((item) => item.name.toUpperCase() === 'XG')
+  if (xgOutput) {
+    return xgOutput.expression
+  }
+  if (outputs.length > 0) {
+    return outputs[outputs.length - 1].expression
+  }
+  return lastExpression
+}
+
+const extractFactorExpression = (code: string): string | null => {
+  const trimmed = code.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  if (!trimmed.startsWith('def')) {
+    const myLanguageExpression = extractMyLanguagePrimaryExpression(trimmed)
+    if (myLanguageExpression) {
+      return stripDfPrefixes(myLanguageExpression)
+    }
+    return stripDfPrefixes(trimmed)
+  }
+
+  const expressionMatch = trimmed.match(/^\s*表达式:\s*(.+?)\s*$/m)
+  if (expressionMatch?.[1]) {
+    return stripDfPrefixes(expressionMatch[1].trim())
+  }
+
+  const returnLine = trimmed.split('\n').find(line => line.trim().startsWith('return '))
+  if (!returnLine) {
+    return null
+  }
+
+  const returnExpression = returnLine.trim().replace(/^return\s+/, '').trim()
+  if (!returnExpression || /^[A-Za-z_][A-Za-z0-9_]*$/.test(returnExpression)) {
+    return null
+  }
+
+  return stripDfPrefixes(returnExpression)
+}
+
+const buildExpandingZScoreExpression = (expression: string) => {
+  const wrapped = `(${expression})`
+  return `((${wrapped} - ${wrapped}.expanding(min_periods=1).mean()) / (${wrapped}.expanding(min_periods=1).std() + 1e-8))`
+}
+
 const PortfolioAnalysis: React.FC = () => {
-  const navigate = useNavigate()
   const [optimizeForm] = Form.useForm()
   const [compareForm] = Form.useForm()
   const weightChartRef = useRef<HTMLDivElement>(null)
@@ -110,7 +243,7 @@ const PortfolioAnalysis: React.FC = () => {
       }
     } catch (error) {
       console.error('加载因子列表失败:', error)
-      message.error('加载因子列表失败')
+      message.error(formatActionFailure('加载因子列表', extractErrorMessage(error)))
     }
   }
 
@@ -188,7 +321,7 @@ const PortfolioAnalysis: React.FC = () => {
       if (response.data.success) {
         const resultData = response.data.data
         setOptimizationResult(resultData)
-        message.success('权重优化完成')
+        message.success(formatActionSuccess(FACTOR_COPY.portfolio.optimizeAction))
 
         // 立即生成组合因子代码（使用返回的数据而不是状态）
         console.log('[runOptimization] 开始生成组合因子代码')
@@ -215,11 +348,21 @@ const PortfolioAnalysis: React.FC = () => {
           }
         }, 300)
       } else {
-        message.error(response.data.message || '优化失败')
+        message.error(
+          formatActionFailure(
+            FACTOR_COPY.portfolio.optimizeAction,
+            response.data.message || '未知错误'
+          )
+        )
       }
     } catch (error: any) {
       console.error('权重优化失败:', error)
-      message.error('权重优化失败: ' + (error.message || '未知错误'))
+      message.error(
+        formatActionFailure(
+          FACTOR_COPY.portfolio.optimizeAction,
+          extractErrorMessage(error)
+        )
+      )
     } finally {
       setLoading(false)
       setOptimizing(false)
@@ -444,109 +587,36 @@ const PortfolioAnalysis: React.FC = () => {
 
     const weights = data.weights
     const factorNames = Object.keys(weights)
-    const methodDisplay = {
-      equal_weight: '等权重',
-      ic_weight: 'IC加权',
-      ir_weight: 'IR加权',
-      max_sharpe: '最大夏普',
-      max_return: '最大收益',
-      min_variance: '最小方差'
-    }
-    const method = data.method || 'equal_weight'
 
     // 从因子列表中获取因子代码
     const getFactorCode = (factorName: string) => {
       const factor = factors.find(f => f.name === factorName)
       if (factor && factor.code) {
-        const code = factor.code.trim()
-
-        // 如果是def函数定义
-        if (code.startsWith('def')) {
-          try {
-            // 提取函数体
-            const lines = code.split('\n')
-
-            // 找到return语句，提取返回表达式
-            const returnLineIndex = lines.findIndex(line => line.trim().startsWith('return'))
-            if (returnLineIndex !== -1) {
-              let returnExpr = lines[returnLineIndex].trim().replace('return', '').trim()
-
-              // 为表达式添加df前缀，处理常见的列名
-              returnExpr = returnExpr
-                .replace(/\bopen\b/g, "df['open']")
-                .replace(/\bclose\b/g, "df['close']")
-                .replace(/\bhigh\b/g, "df['high']")
-                .replace(/\blow\b/g, "df['low']")
-                .replace(/\bvolume\b/g, "df['volume']")
-
-              return returnExpr
-            }
-          } catch (e) {
-            console.warn(`解析因子 ${factorName} 的代码失败:`, e)
-          }
+        const expression = extractFactorExpression(factor.code)
+        if (expression) {
+          return expression
         }
-
-        // 如果不是def函数，或者是解析失败，直接使用原代码
-        // 为表达式添加df前缀
-        let processedCode = code
-          .replace(/\bopen\b/g, "df['open']")
-          .replace(/\bclose\b/g, "df['close']")
-          .replace(/\bhigh\b/g, "df['high']")
-          .replace(/\blow\b/g, "df['low']")
-          .replace(/\bvolume\b/g, "df['volume']")
-
-        return processedCode
       }
 
-      // 如果没有找到因子代码，返回默认值
-      console.warn(`未找到因子 ${factorName} 的代码，使用默认值`)
-      return `df['${factorName}']`
+      console.warn(`未找到可组合的因子表达式: ${factorName}`)
+      return null
     }
 
-    let code = `# 组合因子 - ${methodDisplay[method] || method}优化
-# 生成时间: ${new Date().toLocaleString()}
-
-def calculate_factor(df):
-    """
-    组合因子 - 基于${factorNames.length}个因子的${methodDisplay[method] || method}组合
-    权重分配:
-${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).join('\n')}
-    """
-    import pandas as pd
-    import numpy as np
-`
-
-    // 为每个因子生成计算代码
-    factorNames.forEach((name, index) => {
+    const parts: string[] = []
+    factorNames.forEach((name) => {
       const weight = weights[name]
       const factorCode = getFactorCode(name)
-
-      code += `
-    # 计算因子: ${name} (权重: ${(weight * 100).toFixed(2)}%)
-    try:
-        factor_${index + 1} = ${factorCode}
-        # 标准化
-        factor_${index + 1} = (factor_${index + 1} - factor_${index + 1}.mean()) / (factor_${index + 1}.std() + 1e-8)
-    except:
-        factor_${index + 1} = pd.Series(0, index=df.index)
-`
+      if (!factorCode) {
+        return
+      }
+      parts.push(`${weight.toFixed(6)} * ${buildExpandingZScoreExpression(factorCode)}`)
     })
 
-    // 组合因子
-    code += `
-    # 加权组合
-    composite = `
-    const parts: string[] = []
-    factorNames.forEach((name, index) => {
-      const weight = weights[name]
-      parts.push(`${weight.toFixed(4)} * factor_${index + 1}`)
-    })
-    code += parts.join(' +\n        ')
+    if (parts.length !== factorNames.length) {
+      return ''
+    }
 
-    code += `
-
-    return composite
-`
+    const code = parts.join(' +\n')
 
     console.log('[generateCompositeFactorCode] 生成代码长度:', code.length)
     return code
@@ -557,15 +627,6 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
     if (!optimizationResult) {
       message.warning('请先完成权重优化')
       return
-    }
-
-    const methodDisplay = {
-      equal_weight: '等权重',
-      ic_weight: 'IC加权',
-      ir_weight: 'IR加权',
-      max_sharpe: '最大夏普',
-      max_return: '最大收益',
-      min_variance: '最小方差'
     }
 
     const method = optimizationResult.method || 'equal_weight'
@@ -588,9 +649,17 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
     const factorData = {
       name: `组合因子_${method}_${timestamp}_${stockCode}`,
       category: '组合因子',
-      description: `基于${factorNames.length}个因子的${methodDisplay[method]}优化组合`,
+      description: buildCompositeFactorDescription(
+        factorNames.length,
+        METHOD_LABELS[method] || method
+      ),
       code: compositeFactorCode,
-      formula_type: 'function'
+      formula_type: 'python'
+    }
+
+    if (!compositeFactorCode.trim()) {
+      message.error(FACTOR_COPY.portfolio.missingExpression)
+      return
     }
 
     try {
@@ -598,16 +667,25 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
       const response = await axios.post('/api/factors', factorData)
 
       if (response.data.success) {
-        message.success('组合因子保存成功')
+        message.success(formatActionSuccess(FACTOR_COPY.portfolio.saveAction))
         // 重新加载因子列表
         loadFactors()
       } else {
-        message.error(response.data.message || '保存失败')
+        message.error(
+          formatActionFailure(
+            FACTOR_COPY.portfolio.saveAction,
+            response.data.message || '未知错误'
+          )
+        )
       }
     } catch (error: any) {
       console.error('保存组合因子失败:', error)
-      const errorMsg = error.response?.data?.detail || error.response?.data?.message || error.message || '未知错误'
-      message.error('保存组合因子失败: ' + errorMsg)
+      message.error(
+        formatActionFailure(
+          FACTOR_COPY.portfolio.saveAction,
+          extractErrorMessage(error)
+        )
+      )
     } finally {
       setSavingFactor(false)
     }
@@ -800,18 +878,28 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
 
       if (response.data.success) {
         setCompareResult(response.data.data.results || response.data.data)
-        message.success('方法对比完成')
+        message.success(formatActionSuccess(FACTOR_COPY.portfolio.compareAction))
 
         // 延迟渲染图表
         setTimeout(() => {
           updateCompareChart(response.data.data.results || response.data.data)
         }, 300)
       } else {
-        message.error(response.data.message || '对比失败')
+        message.error(
+          formatActionFailure(
+            FACTOR_COPY.portfolio.compareAction,
+            response.data.message || '未知错误'
+          )
+        )
       }
     } catch (error: any) {
       console.error('方法对比失败:', error)
-      message.error('方法对比失败: ' + (error.message || '未知错误'))
+      message.error(
+        formatActionFailure(
+          FACTOR_COPY.portfolio.compareAction,
+          extractErrorMessage(error)
+        )
+      )
     } finally {
       setLoading(false)
     }
@@ -992,7 +1080,7 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
             <PieChartOutlined className="header-icon" />
             <div>
               <h1 className="page-title">组合分析</h1>
-              <p className="page-subtitle">多因子组合优化与性能评估</p>
+              <p className="page-subtitle">{FACTOR_COPY.portfolio.subtitle}</p>
             </div>
           </div>
         </div>
@@ -1216,7 +1304,7 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
                       </Form.Item>
 
                       {/* 参数配置 */}
-                      <Divider style={{ content: { margin: 0 } }} titlePlacement="left">
+                      <Divider styles={{ content: { margin: 0 } }} titlePlacement="left">
                         参数配置
                       </Divider>
 
@@ -1308,10 +1396,10 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
                       <div className="placeholder-content">
                         <BarChartOutlined className="placeholder-icon" />
                         <p className="placeholder-text">
-                          配置参数后点击"开始优化"按钮
+                          {FACTOR_COPY.portfolio.emptyStateTitle}
                         </p>
                         <p className="placeholder-hint">
-                          系统将自动计算最优因子权重配置
+                          {FACTOR_COPY.portfolio.emptyStateHint}
                         </p>
                       </div>
                     )}
@@ -1319,18 +1407,18 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
                     {/* 优化中 */}
                     {optimizing && (
                       <div className="optimizing-status">
-                        <Spin size="large" description="正在优化权重配置..." />
+                        <Spin size="large" description={FACTOR_COPY.portfolio.running} />
                       </div>
                     )}
 
                     {/* 优化结果 */}
                     {optimizationResult && (
                       <div className="optimization-result">
-                        {/* 组合因子代码 */}
+                        {/* 组合因子表达式 */}
                         {compositeFactorCode && (
                           <div style={{ marginBottom: 24 }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                              <h4 className="result-title" style={{ margin: 0 }}><AimOutlined /> 组合因子代码</h4>
+                              <h4 className="result-title" style={{ margin: 0 }}><AimOutlined /> {FACTOR_COPY.portfolio.expressionTitle}</h4>
                               <Button
                                 type="primary"
                                 icon={<RocketOutlined />}
@@ -1338,7 +1426,7 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
                                 loading={savingFactor}
                                 size="small"
                               >
-                                保存为自定义因子
+                                保存到因子库
                               </Button>
                             </div>
                             <Card
@@ -1365,7 +1453,7 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
                               </pre>
                             </Card>
                             <p style={{ marginTop: 12, fontSize: '13px', color: '#64748b' }}>
-                              <BulbOutlined style={{ marginRight: 4 }} />提示：点击"保存为自定义因子"按钮后，可以在因子管理页面查看和使用这个组合因子
+                              <BulbOutlined style={{ marginRight: 4 }} />{FACTOR_COPY.portfolio.expressionHint}
                             </p>
                           </div>
                         )}
@@ -1403,11 +1491,9 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
                                 title="组合收益率"
                                 value={optimizationResult?.metrics?.return ? ((optimizationResult.metrics.return * 100).toFixed(2)) : '-'}
                                 suffix={optimizationResult?.metrics?.return ? '%' : undefined}
-                                styles={{
-                                  content: {
-                                    color: '#3b82f6',
-                                    fontWeight: 700
-                                  }
+                                valueStyle={{
+                                  color: '#3b82f6',
+                                  fontWeight: 700
                                 }}
                               />
                             </Col>
@@ -1415,11 +1501,9 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
                               <Statistic
                                 title="IC值"
                                 value={optimizationResult?.metrics?.ic?.toFixed(4) || '-'}
-                                styles={{
-                                  content: {
-                                    color: '#ef4444',
-                                    fontWeight: 700
-                                  }
+                                valueStyle={{
+                                  color: '#ef4444',
+                                  fontWeight: 700
                                 }}
                               />
                             </Col>
@@ -1427,14 +1511,12 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
                               <Statistic
                                 title="IR值"
                                 value={optimizationResult?.metrics?.ir?.toFixed(4) || '-'}
-                                styles={{
-                                  content: {
-                                    color:
-                                      (optimizationResult?.metrics?.ir || 0) > 1
-                                        ? '#22c55e'
-                                        : '#f59e0b',
-                                    fontWeight: 700
-                                  }
+                                valueStyle={{
+                                  color:
+                                    (optimizationResult?.metrics?.ir || 0) > 1
+                                      ? '#22c55e'
+                                      : '#f59e0b',
+                                  fontWeight: 700
                                 }}
                               />
                             </Col>
@@ -1722,7 +1804,7 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
                         <RangePicker style={{ width: '100%' }} />
                       </Form.Item>
 
-                      <Divider style={{ content: { margin: 0 } }} titlePlacement="left">
+                      <Divider styles={{ content: { margin: 0 } }} titlePlacement="left">
                         对比方法
                       </Divider>
                       <p className="text-hint">选择要对比的优化方法（至少2个）</p>
@@ -1760,14 +1842,6 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
                         {() => {
                           const selectedMethods =
                             compareForm.getFieldValue('compare_methods') || []
-                          const methodNames = {
-                            equal_weight: '等权重',
-                            ic_weight: 'IC加权',
-                            ir_weight: 'IR加权',
-                            max_sharpe: '最大夏普',
-                            max_return: '最大收益',
-                            min_variance: '最小方差'
-                          }
                           return (
                             <div
                               style={{
@@ -1822,7 +1896,7 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
                           block
                           size="large"
                         >
-                          开始对比
+                          开始方法对比
                         </Button>
                       </Form.Item>
                     </Form>
@@ -1831,12 +1905,15 @@ ${factorNames.map(name => `    ${name}: ${(weights[name] * 100).toFixed(2)}%`).j
 
                 {/* 右侧结果展示 */}
                 <Col xs={24} lg={16}>
-                  <Card title="对比结果" className="result-card">
+                  <Card title="方法对比结果" className="result-card">
                     {!compareResult && (
                       <div className="placeholder-content">
                         <BarChartOutlined className="placeholder-icon" />
                         <p className="placeholder-text">
-                          选择因子和方法后点击"开始对比"
+                          {FACTOR_COPY.portfolio.compareEmptyStateTitle}
+                        </p>
+                        <p className="placeholder-hint">
+                          {FACTOR_COPY.portfolio.compareEmptyStateHint}
                         </p>
                       </div>
                     )}

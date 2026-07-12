@@ -1,7 +1,7 @@
 """
 数据库连接管理模块
 """
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session
 from sqlalchemy.pool import StaticPool
 from contextlib import contextmanager
@@ -34,6 +34,45 @@ def init_db() -> None:
     from backend.models.factor_version import FactorVersionModel
 
     Base.metadata.create_all(bind=engine)
+    _migrate_legacy_columns()
+
+
+def _migrate_legacy_columns() -> None:
+    """补齐历史数据库缺失列。"""
+    inspector = inspect(engine)
+
+    if not inspector.has_table("factors"):
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("factors")}
+    if "formula_type" not in columns:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE factors "
+                    "ADD COLUMN formula_type VARCHAR(20) NOT NULL DEFAULT 'mylanguage'"
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    UPDATE factors
+                    SET formula_type = CASE
+                        WHEN lower(trim(code)) LIKE 'def calculate_factor%'
+                             OR instr(lower(code), 'df[') > 0
+                             OR instr(lower(code), 'np.') > 0
+                             OR instr(lower(code), 'pd.') > 0
+                             OR instr(lower(code), '.rolling(') > 0
+                             OR instr(lower(code), '.expanding(') > 0
+                             OR instr(lower(code), '.astype(') > 0
+                             OR instr(lower(code), '.shift(') > 0
+                             OR instr(lower(code), 'lambda ') > 0
+                        THEN 'python'
+                        ELSE 'mylanguage'
+                    END
+                    """
+                )
+            )
 
 
 @contextmanager

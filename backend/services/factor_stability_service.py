@@ -8,6 +8,7 @@ from scipy import stats
 from statsmodels.tsa.stattools import adfuller
 
 from backend.services.analysis_service import AnalysisService
+from backend.services.factor_service import factor_service
 
 
 class FactorStabilityService:
@@ -15,6 +16,126 @@ class FactorStabilityService:
 
     def __init__(self):
         pass
+
+    def comprehensive_stability_test(
+        self,
+        factor_name: str,
+        stock_codes: List[str],
+        start_date: str,
+        end_date: str,
+    ) -> Dict:
+        """对指定因子执行完整稳定性检验。"""
+        factor_data_map = factor_service.calculate_factors_for_stocks(
+            stock_codes=stock_codes,
+            factor_names=[factor_name],
+            start_date=start_date,
+            end_date=end_date,
+            rolling_window=None,
+        )
+
+        if not factor_data_map:
+            raise ValueError("未能获取有效的因子数据")
+
+        combined_segments = []
+        per_stock = {}
+
+        for stock_code, df in factor_data_map.items():
+            if factor_name not in df.columns or "close" not in df.columns:
+                continue
+
+            stock_df = df.copy()
+            stock_df["future_return"] = stock_df["close"].pct_change().shift(-1)
+            stock_df = stock_df.replace([np.inf, -np.inf], np.nan)
+
+            factor_series = stock_df[factor_name].dropna()
+            ic_series = stock_df[factor_name].rolling(window=20, min_periods=10).corr(
+                stock_df["future_return"]
+            ).dropna()
+
+            per_stock_result = {}
+
+            if len(factor_series) >= 40:
+                try:
+                    window = min(252, max(20, len(factor_series) // 2))
+                    per_stock_result["distribution_stability"] = self.calculate_distribution_stability(
+                        factor_series=factor_series,
+                        window=window,
+                    )
+                except Exception as exc:
+                    per_stock_result["distribution_stability"] = {"error": str(exc)}
+
+            if len(ic_series) >= 20:
+                per_stock_result["time_series_stability"] = self.calculate_time_series_stability(ic_series)
+                per_stock_result["coefficient_of_variation"] = self.calculate_coefficient_of_variation(ic_series)
+            else:
+                per_stock_result["time_series_stability"] = {"error": "IC序列长度不足，无法执行ADF检验"}
+                per_stock_result["coefficient_of_variation"] = {"error": "IC序列长度不足"}
+
+            per_stock_result["rolling_stability"] = self.calculate_rolling_stability(
+                factor_data=stock_df,
+                factor_name=factor_name,
+                return_col="future_return",
+            )
+
+            try:
+                per_stock_result["market_regime_performance"] = self.calculate_market_regime_performance(
+                    factor_data=stock_df,
+                    factor_name=factor_name,
+                    return_col="future_return",
+                )
+            except Exception as exc:
+                per_stock_result["market_regime_performance"] = {"error": str(exc)}
+
+            per_stock[stock_code] = per_stock_result
+            combined_segments.append(
+                stock_df[[factor_name, "future_return", "close"]].assign(stock_code=stock_code)
+            )
+
+        if not combined_segments:
+            raise ValueError("未能形成可用于稳定性分析的数据集")
+
+        combined_df = pd.concat(combined_segments, axis=0).sort_index()
+        combined_factor = combined_df[factor_name].dropna()
+        combined_ic_series = combined_df[factor_name].rolling(window=20, min_periods=10).corr(
+            combined_df["future_return"]
+        ).dropna()
+
+        aggregate = {}
+        if len(combined_factor) >= 40:
+            try:
+                window = min(252, max(20, len(combined_factor) // 2))
+                aggregate["distribution_stability"] = self.calculate_distribution_stability(
+                    factor_series=combined_factor,
+                    window=window,
+                )
+            except Exception as exc:
+                aggregate["distribution_stability"] = {"error": str(exc)}
+        else:
+            aggregate["distribution_stability"] = {"error": "样本长度不足，无法执行分布稳定性检验"}
+
+        if len(combined_ic_series) >= 20:
+            aggregate["time_series_stability"] = self.calculate_time_series_stability(combined_ic_series)
+            aggregate["coefficient_of_variation"] = self.calculate_coefficient_of_variation(combined_ic_series)
+        else:
+            aggregate["time_series_stability"] = {"error": "综合IC序列长度不足"}
+            aggregate["coefficient_of_variation"] = {"error": "综合IC序列长度不足"}
+
+        aggregate["rolling_stability"] = self.calculate_rolling_stability(
+            factor_data=combined_df,
+            factor_name=factor_name,
+            return_col="future_return",
+        )
+
+        return {
+            "factor_name": factor_name,
+            "stock_codes": list(factor_data_map.keys()),
+            "analysis_period": {
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+            "aggregate": aggregate,
+            "per_stock": per_stock,
+        }
 
     def calculate_distribution_stability(
         self,

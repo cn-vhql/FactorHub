@@ -9,6 +9,7 @@ from scipy import stats
 from backend.services.factor_neutralization_service import factor_neutralization_service
 from backend.services.factor_stability_service import factor_stability_service
 from backend.services.factor_summary_service import factor_summary_service
+from backend.services.factor_service import factor_service
 
 
 class EnhancedAnalysisService:
@@ -16,6 +17,104 @@ class EnhancedAnalysisService:
 
     def __init__(self):
         pass
+
+    def analyze_multi_period_ic(
+        self,
+        factor_name: str,
+        stock_codes: List[str],
+        start_date: str,
+        end_date: str,
+        periods: Optional[List[int]] = None,
+    ) -> Dict[str, Any]:
+        """分析因子在多预测周期下的IC表现。"""
+        if periods is None:
+            periods = [1, 5, 10, 20]
+
+        factor_data_map = factor_service.calculate_factors_for_stocks(
+            stock_codes=stock_codes,
+            factor_names=[factor_name],
+            start_date=start_date,
+            end_date=end_date,
+            rolling_window=None,
+        )
+
+        if not factor_data_map:
+            raise ValueError("未能获取有效的因子数据")
+
+        period_results = []
+        per_stock_results = {stock_code: {} for stock_code in factor_data_map.keys()}
+
+        for period in periods:
+            ic_values = []
+            ic_by_stock = {}
+
+            for stock_code, df in factor_data_map.items():
+                if factor_name not in df.columns or "close" not in df.columns:
+                    continue
+
+                future_returns = df["close"].pct_change(period).shift(-period)
+                aligned = pd.DataFrame({
+                    "factor": df[factor_name],
+                    "return": future_returns,
+                }).replace([np.inf, -np.inf], np.nan).dropna()
+
+                if len(aligned) < 10:
+                    continue
+
+                ic = aligned["factor"].corr(aligned["return"])
+                if pd.notna(ic):
+                    ic_float = float(ic)
+                    ic_values.append(ic_float)
+                    ic_by_stock[stock_code] = ic_float
+                    per_stock_results[stock_code][f"{period}d"] = {
+                        "ic": ic_float,
+                        "sample_size": int(len(aligned)),
+                    }
+
+            if ic_values:
+                period_results.append({
+                    "period_days": period,
+                    "period_label": f"{period}日",
+                    "mean_ic": float(np.mean(ic_values)),
+                    "std_ic": float(np.std(ic_values)),
+                    "positive_ratio": float(np.mean([value > 0 for value in ic_values])),
+                    "sample_size": len(ic_values),
+                    "per_stock_ic": ic_by_stock,
+                })
+            else:
+                period_results.append({
+                    "period_days": period,
+                    "period_label": f"{period}日",
+                    "mean_ic": None,
+                    "std_ic": None,
+                    "positive_ratio": None,
+                    "sample_size": 0,
+                    "per_stock_ic": {},
+                })
+
+        valid_periods = [item for item in period_results if item["mean_ic"] is not None]
+        decay_trend = None
+        if len(valid_periods) >= 2:
+            x = np.array([item["period_days"] for item in valid_periods], dtype=float)
+            y = np.array([item["mean_ic"] for item in valid_periods], dtype=float)
+            slope, intercept = np.polyfit(x, y, 1)
+            decay_trend = {
+                "slope": float(slope),
+                "intercept": float(intercept),
+                "interpretation": "IC随周期延长衰减" if slope < 0 else "IC未呈现明显衰减",
+            }
+
+        return {
+            "factor_name": factor_name,
+            "stock_codes": list(factor_data_map.keys()),
+            "analysis_period": {
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+            "period_results": period_results,
+            "decay_trend": decay_trend,
+            "per_stock_results": per_stock_results,
+        }
 
     def calculate_ic_significance(
         self,

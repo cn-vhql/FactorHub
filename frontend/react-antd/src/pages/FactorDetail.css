@@ -425,3 +425,104 @@
   font-size: 11px;
 }
 
+/* ========== AI 分析报告 ========== */
+.factor-detail-container .ai-analysis-report {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 24px;
+}
+
+.factor-detail-container .markdown-report-viewer {
+  color: #1e293b;
+  font-size: 14px;
+  line-height: 1.8;
+  word-break: break-word;
+}
+
+.factor-detail-container .markdown-report-viewer h1,
+.factor-detail-container .markdown-report-viewer h2,
+.factor-detail-container .markdown-report-viewer h3,
+.factor-detail-container .markdown-report-viewer h4 {
+  color: #0f172a;
+  font-weight: 700;
+  margin-top: 1.4em;
+  margin-bottom: 0.6em;
+}
+
+.factor-detail-container .markdown-report-viewer h1 {
+  font-size: 28px;
+}
+
+.factor-detail-container .markdown-report-viewer h2 {
+  font-size: 22px;
+}
+
+.factor-detail-container .markdown-report-viewer h3 {
+  font-size: 18px;
+}
+
+.factor-detail-container .markdown-report-viewer p {
+  margin: 0 0 1em 0;
+}
+
+.factor-detail-container .markdown-report-viewer ul,
+.factor-detail-container .markdown-report-viewer ol {
+  margin: 0 0 1em 1.5em;
+  padding: 0;
+}
+
+.factor-detail-container .markdown-report-viewer li {
+  margin-bottom: 0.35em;
+}
+
+.factor-detail-container .markdown-report-viewer blockquote {
+  margin: 1em 0;
+  padding: 12px 16px;
+  border-left: 4px solid #3b82f6;
+  background: #eff6ff;
+  color: #334155;
+}
+
+.factor-detail-container .markdown-report-viewer code {
+  font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+  background: rgba(59, 130, 246, 0.08);
+  color: #1d4ed8;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.factor-detail-container .markdown-report-viewer pre {
+  overflow-x: auto;
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin: 0 0 1em 0;
+}
+
+.factor-detail-container .markdown-report-viewer pre code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+}
+
+.factor-detail-container .markdown-report-viewer table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+}
+
+.factor-detail-container .markdown-report-viewer th,
+.factor-detail-container .markdown-report-viewer td {
+  border: 1px solid #cbd5e1;
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.factor-detail-container .markdown-report-viewer th {
+  background: #f8fafc;
+  color: #0f172a;
+  font-weight: 700;
+}
+

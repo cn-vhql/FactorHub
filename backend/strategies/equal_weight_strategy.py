@@ -38,16 +38,18 @@ class EqualWeightStrategy(BaseStrategy):
         """
         生成交易信号
 
-        简化版：假设df已经选好股票池，全部买入
-
         Args:
             df: 数据
 
         Returns:
             信号序列
         """
-        # 简化实现：全部买入
-        signals = pd.Series(1, index=df.index)
+        if "close" not in df.columns:
+            raise ValueError("等权重策略需要 close 列")
+
+        signals = pd.Series(0, index=df.index, dtype=int)
+        tradable_mask = df["close"].notna() & (df["close"] > 0)
+        signals.loc[tradable_mask] = 1
         return signals
 
     def calculate_weights(
@@ -65,10 +67,20 @@ class EqualWeightStrategy(BaseStrategy):
         Returns:
             权重序列
         """
-        weights = pd.Series(0.0, index=df.index)
-
-        # 有信号时，等权配置
+        weights = pd.Series(0.0, index=df.index, dtype=float)
         mask = signals == 1
-        weights[mask] = 1.0
 
+        if "date" in df.columns and "stock_code" in df.columns:
+            active_counts = (
+                df.loc[mask, ["date", "stock_code"]]
+                .groupby("date")["stock_code"]
+                .nunique()
+            )
+            for date, count in active_counts.items():
+                if count > 0:
+                    date_mask = mask & (df["date"] == date)
+                    weights.loc[date_mask] = 1.0 / count
+            return weights
+
+        weights.loc[mask] = 1.0
         return weights

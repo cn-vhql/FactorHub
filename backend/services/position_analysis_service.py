@@ -14,7 +14,7 @@ class PositionAnalysisService:
 
     def analyze_positions(
         self,
-        positions: pd.Series,
+        positions: pd.Series | pd.DataFrame,
         initial_capital: float = 1000000
     ) -> Dict:
         """
@@ -27,28 +27,25 @@ class PositionAnalysisService:
         Returns:
             持仓统计信息
         """
-        positions_clean = positions.dropna()
-
-        if len(positions_clean) == 0:
+        position_frame = self._to_position_frame(positions)
+        if position_frame.empty:
             return self._empty_stats()
 
-        # 1. 基础统计
-        avg_position = positions_clean.abs().mean()
-        max_position = positions_clean.abs().max()
-        min_position = positions_clean.abs().min()
+        gross_exposure = position_frame.abs().sum(axis=1)
+        non_zero_weights = position_frame.abs().replace(0, np.nan).stack()
+        per_period_turnover = position_frame.diff().abs().sum(axis=1).fillna(0.0) * 0.5
 
-        # 2. 持仓分布
-        position_zero_ratio = (positions_clean == 0).sum() / len(positions_clean)
-        position_full_ratio = (positions_clean.abs() >= 0.9).sum() / len(positions_clean)
+        avg_position = gross_exposure.mean()
+        max_position = position_frame.abs().max(axis=1).max()
+        min_position = float(non_zero_weights.min()) if not non_zero_weights.empty else 0.0
 
-        # 3. 持仓变化
-        position_changes = positions_clean.diff().abs()
-        avg_position_change = position_changes.mean()
-        max_position_change = position_changes.max()
+        position_zero_ratio = (gross_exposure <= 1e-12).mean()
+        position_full_ratio = (gross_exposure >= 0.9).mean()
 
-        # 4. 持仓时长（假设连续持仓）
-        # 找出持仓时段
-        is_invested = positions_clean.abs() > 0
+        avg_position_change = per_period_turnover.mean()
+        max_position_change = per_period_turnover.max()
+
+        is_invested = gross_exposure > 0
         invested_periods = 0
         total_invested_days = 0
 
@@ -70,14 +67,11 @@ class PositionAnalysisService:
             total_invested_days / invested_periods if invested_periods > 0 else 0
         )
 
-        # 5. 换手率
-        # 简化版：权重变化总和
-        turnover = position_changes.sum()
+        turnover = per_period_turnover.sum()
 
-        # 6. 持仓价值
-        position_values = positions_clean * initial_capital
-        avg_position_value = position_values.abs().mean()
-        max_position_value = position_values.abs().max()
+        position_values = gross_exposure * initial_capital
+        avg_position_value = position_values.mean()
+        max_position_value = position_values.max()
 
         return {
             "basic_stats": {
@@ -105,7 +99,7 @@ class PositionAnalysisService:
 
     def analyze_position_history(
         self,
-        positions: pd.Series,
+        positions: pd.Series | pd.DataFrame,
         window: int = 20
     ) -> pd.DataFrame:
         """
@@ -118,28 +112,22 @@ class PositionAnalysisService:
         Returns:
             持仓历史DataFrame
         """
-        df = pd.DataFrame(index=positions.index)
-        df["position"] = positions
+        position_frame = self._to_position_frame(positions)
+        gross_exposure = position_frame.abs().sum(axis=1)
+        df = pd.DataFrame(index=position_frame.index)
+        df["position"] = gross_exposure
 
-        # 滚动统计
-        df["rolling_avg_position"] = (
-            positions.abs().rolling(window=window).mean()
-        )
-        df["rolling_max_position"] = (
-            positions.abs().rolling(window=window).max()
-        )
-        df["rolling_min_position"] = (
-            positions.abs().rolling(window=window).min()
-        )
+        df["rolling_avg_position"] = gross_exposure.rolling(window=window).mean()
+        df["rolling_max_position"] = gross_exposure.rolling(window=window).max()
+        df["rolling_min_position"] = gross_exposure.rolling(window=window).min()
 
-        # 持仓变化
-        df["position_change"] = positions.diff().abs()
+        df["position_change"] = position_frame.diff().abs().sum(axis=1).fillna(0.0) * 0.5
 
         return df
 
     def calculate_position_concentration(
         self,
-        positions: pd.Series
+        positions: pd.Series | pd.DataFrame
     ) -> Dict:
         """
         计算持仓集中度
@@ -150,35 +138,103 @@ class PositionAnalysisService:
         Returns:
             集中度指标
         """
-        positions_clean = positions.dropna()
-
-        if len(positions_clean) == 0:
+        snapshot = self._extract_latest_snapshot(positions)
+        if snapshot.empty:
             return {
                 "concentration_ratio": 0.0,
                 "herfindahl_index": 0.0,
                 "gini_coefficient": 0.0,
             }
 
-        # 简化版：单股票，集中度为1
-        # 实际应用中应该是多股票组合
+        total_weight = snapshot.sum()
+        if total_weight <= 0:
+            return {
+                "concentration_ratio": 0.0,
+                "herfindahl_index": 0.0,
+                "gini_coefficient": 0.0,
+            }
 
-        # 1. 集中度（前N大持仓占比）
-        # 单股票情况，集中度为100%
-        concentration_ratio = 1.0
-
-        # 2. Herfindahl指数（平方和）
-        # 单股票情况，H = 1^2 = 1
-        herfindahl_index = 1.0
-
-        # 3. 基尼系数
-        # 单股票情况，基尼系数为0（完全平等）
-        gini_coefficient = 0.0
+        normalized = snapshot / total_weight
+        concentration_ratio = normalized.max()
+        herfindahl_index = (normalized ** 2).sum()
+        gini_coefficient = self._calculate_gini(normalized.values)
 
         return {
             "concentration_ratio": float(concentration_ratio),
             "herfindahl_index": float(herfindahl_index),
             "gini_coefficient": float(gini_coefficient),
         }
+
+    def _to_position_frame(self, positions: pd.Series | pd.DataFrame) -> pd.DataFrame:
+        """将不同结构的持仓输入统一为按时间索引的权重矩阵。"""
+        if isinstance(positions, pd.DataFrame):
+            if {"date", "stock_code", "weight"}.issubset(positions.columns):
+                frame = positions.copy()
+                frame["date"] = pd.to_datetime(frame["date"])
+                matrix = frame.pivot_table(
+                    index="date",
+                    columns="stock_code",
+                    values="weight",
+                    aggfunc="sum",
+                    fill_value=0.0,
+                )
+                return matrix.sort_index()
+
+            if {"stock_code", "weight"}.issubset(positions.columns):
+                snapshot = (
+                    positions.groupby("stock_code")["weight"].sum().to_frame().T
+                )
+                snapshot.index = pd.Index(["snapshot"])
+                return snapshot.fillna(0.0)
+
+            numeric_df = positions.select_dtypes(include=[np.number]).copy()
+            return numeric_df.fillna(0.0)
+
+        series = positions.dropna()
+        if series.empty:
+            return pd.DataFrame()
+
+        if isinstance(series.index, pd.MultiIndex) and "stock_code" in series.index.names:
+            stock_level = series.index.names.index("stock_code")
+            if "date" in series.index.names:
+                frame = (
+                    series.groupby(level=list(range(series.index.nlevels))).sum()
+                    .unstack(level=stock_level)
+                    .fillna(0.0)
+                )
+                frame.columns = frame.columns.get_level_values(-1)
+                return frame.sort_index()
+
+            snapshot = series.groupby(level=stock_level).sum().to_frame().T
+            snapshot.index = pd.Index(["snapshot"])
+            return snapshot.fillna(0.0)
+
+        frame = pd.DataFrame({"asset_0": series.astype(float)})
+        return frame.fillna(0.0)
+
+    def _extract_latest_snapshot(self, positions: pd.Series | pd.DataFrame) -> pd.Series:
+        """提取最近一期持仓快照并聚合为绝对权重。"""
+        frame = self._to_position_frame(positions)
+        if frame.empty:
+            return pd.Series(dtype=float)
+
+        latest = frame.iloc[-1].abs()
+        latest = latest[latest > 0]
+        return latest
+
+    def _calculate_gini(self, values: np.ndarray) -> float:
+        """计算基尼系数。"""
+        if len(values) == 0:
+            return 0.0
+
+        sorted_values = np.sort(values)
+        cumulative = np.cumsum(sorted_values)
+        total = cumulative[-1]
+        if total == 0:
+            return 0.0
+
+        n = len(sorted_values)
+        return float((n + 1 - 2 * np.sum(cumulative) / total) / n)
 
     def _empty_stats(self) -> Dict:
         """返回空的统计信息"""

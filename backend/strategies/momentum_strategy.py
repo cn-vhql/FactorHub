@@ -84,7 +84,7 @@ class MomentumStrategy(BaseStrategy):
         # 信号为1时满仓
         weights[signals == 1] = 1.0
 
-        # 信号为-1时做空（可选，这里简化为空仓）
+        # 当前策略实现为多头/空仓，不启用做空仓位
         # weights[signals == -1] = -1.0
 
         return weights

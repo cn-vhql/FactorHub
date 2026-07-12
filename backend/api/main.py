@@ -24,6 +24,7 @@ from backend.services.data_service import data_service
 
 # 导入路由
 from .routers import (
+    ai,
     factors,
     analysis,
     mining,
@@ -40,6 +41,13 @@ async def lifespan(app: FastAPI):
     print("启动FastAPI服务...")
     init_db()
     factor_service.load_preset_factors()
+    cleanup_summary = factor_service.cleanup_legacy_generated_factors()
+    app.json_encoder = NumpyJSONEncoder
+    if cleanup_summary["migrated"] or cleanup_summary["deleted"]:
+        print(
+            "历史旧包装因子已清理: "
+            f"迁移 {cleanup_summary['migrated']} 个, 删除 {cleanup_summary['deleted']} 个"
+        )
     print("数据库和预置因子加载完成")
 
     yield
@@ -125,6 +133,7 @@ async def spa_fallback(request, exc):
 
 # 注册路由
 app.include_router(factors.router, prefix="/api/factors", tags=["因子管理"])
+app.include_router(ai.router, prefix="/api/ai", tags=["AI 因子"])
 app.include_router(analysis.router, prefix="/api/analysis", tags=["因子分析"])
 app.include_router(mining.router, prefix="/api/mining", tags=["因子挖掘"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["组合分析"])
@@ -150,12 +159,6 @@ async def health_check():
 
 
 # 全局异常处理
-# 覆盖FastAPI的默认JSON响应编码器
-@app.on_event("startup")
-async def startup_event():
-    """应用启动事件 - 覆盖默认JSON编码器"""
-    app.json_encoder = NumpyJSONEncoder
-
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     """全局异常处理"""

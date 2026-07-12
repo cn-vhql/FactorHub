@@ -46,16 +46,12 @@ class MarketCapStrategy(BaseStrategy):
         Returns:
             信号序列
         """
+        if self.market_cap_column not in df.columns:
+            raise ValueError(f"市值加权策略需要列: {self.market_cap_column}")
+
         signals = pd.Series(0, index=df.index)
-
-        # 对有市值数据的股票生买入信号
-        if self.market_cap_column in df.columns:
-            mask = df[self.market_cap_column].notna() & (df[self.market_cap_column] > 0)
-            signals[mask] = 1
-        else:
-            # 如果没有市值数据，对所有股票生买入信号
-            signals = pd.Series(1, index=df.index)
-
+        mask = df[self.market_cap_column].notna() & (df[self.market_cap_column] > 0)
+        signals[mask] = 1
         return signals
 
     def calculate_weights(
@@ -75,12 +71,8 @@ class MarketCapStrategy(BaseStrategy):
         """
         weights = pd.Series(0.0, index=df.index)
 
-        # 检查是否有市值数据
         if self.market_cap_column not in df.columns:
-            # 没有市值数据，退化为等权重
-            mask = signals == 1
-            weights[mask] = 1.0
-            return weights
+            raise ValueError(f"市值加权策略需要列: {self.market_cap_column}")
 
         # 计算市值权重 - 真正的市值加权实现
         # 对每个时间点计算横截面的市值权重

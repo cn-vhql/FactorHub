@@ -86,14 +86,22 @@ class CacheRepository:
         total_count = len(all_metadata)
         total_size = sum(m.size for m in all_metadata)
         total_access_count = sum(m.access_count for m in all_metadata)
+        expired_items = [m for m in all_metadata if m.is_expired()]
+        active_items = [m for m in all_metadata if not m.is_expired()]
+        expired_count = len(expired_items)
+        active_count = len(active_items)
 
-        expired_count = sum(1 for m in all_metadata if m.is_expired())
-
-        # 计算命中率（假设每次 get 都是一次访问尝试）
-        # 这里简化计算：访问总数 / (访问总数 + 过期数)
-        # 实际命中率需要在 CacheService 中跟踪
-        hit_count = total_access_count
-        miss_count = expired_count  # 简化假设
+        average_access_count = (
+            total_access_count / total_count if total_count > 0 else 0.0
+        )
+        latest_accessed = max(
+            (m.last_accessed for m in all_metadata if m.last_accessed is not None),
+            default=None,
+        )
+        latest_created_at = max(
+            (m.created_at for m in all_metadata if m.created_at is not None),
+            default=None,
+        )
 
         return {
             "total_count": total_count,
@@ -101,7 +109,12 @@ class CacheRepository:
             "total_size_mb": round(total_size / 1024 / 1024, 2),
             "total_access_count": total_access_count,
             "expired_count": expired_count,
-            "active_count": total_count - expired_count,
+            "active_count": active_count,
+            "average_access_count": round(average_access_count, 4),
+            "expired_size": sum(m.size for m in expired_items),
+            "active_size": sum(m.size for m in active_items),
+            "latest_accessed": latest_accessed.isoformat() if latest_accessed else None,
+            "latest_created_at": latest_created_at.isoformat() if latest_created_at else None,
         }
 
     def clear_all(self) -> int:

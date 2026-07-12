@@ -33,10 +33,11 @@ request.interceptors.response.use(
 
     if (error.response) {
       const { status, data } = error.response
+      const responseMessage = data?.detail || data?.message
 
       switch (status) {
         case 400:
-          message = data.message || '请求参数错误'
+          message = responseMessage || '请求参数错误'
           break
         case 401:
           message = '未授权，请重新登录'
@@ -45,13 +46,13 @@ request.interceptors.response.use(
           message = '拒绝访问'
           break
         case 404:
-          message = '请求的资源不存在'
+          message = responseMessage || '请求的资源不存在'
           break
         case 500:
-          message = data.message || '服务器错误'
+          message = responseMessage || '服务器错误'
           break
         default:
-          message = data.message || `请求失败 (${status})`
+          message = responseMessage || `请求失败 (${status})`
       }
     } else if (error.request) {
       message = '网络错误，请检查网络连接'
@@ -95,6 +96,26 @@ export const api = {
     return request.get(`/factors/${id}`)
   },
 
+  // 获取 AI 模型配置
+  getAiModelConfig() {
+    return request.get('/ai/model-config')
+  },
+
+  // 保存 AI 模型配置
+  saveAiModelConfig(data: any) {
+    return request.post('/ai/model-config', data)
+  },
+
+  // 验证 AI 模型配置
+  validateAiModelConfig(data: any) {
+    return request.post('/ai/model-config/validate', data)
+  },
+
+  // AI 生成因子
+  generateAiFactor(data: any) {
+    return request.post('/ai/generate-factor', data, { timeout: 180000 })
+  },
+
   // IC分析
   calculateIC(data: {
     factor_name: string
@@ -129,12 +150,19 @@ export const api = {
 
   // 策略回测
   runBacktest(data: any) {
-    return request.post('/backtesting/run', data)
+    return request.post('/backtest/single', data)
   },
 
-  // 获取回测结果
-  getBacktestResult(taskId: string) {
-    return request.get(`/backtesting/results/${taskId}`)
+  // 策略对比回测
+  runBacktestComparison(data: any) {
+    return request.post('/backtest/comparison', data)
+  },
+
+  // 获取回测历史
+  getBacktestHistory(limit: number = 10) {
+    return request.get('/backtest/history', {
+      params: { limit }
+    })
   },
 
   // 验证因子公式

@@ -4,6 +4,7 @@
 import numpy as np
 import pandas as pd
 import talib
+import re
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 import yaml
@@ -11,6 +12,9 @@ import logging
 
 from backend.core.database import get_db_session
 from backend.core.settings import settings
+from backend.formula_engine import FormulaExecutionResult, formula_engine_manager
+from backend.formula_engine.code_normalizer import normalize_formula_code
+from backend.formula_engine.runtime import FormulaExecutionError, infer_formula_type, normalize_formula_type
 from backend.models.factor import FactorModel
 from backend.repositories.factor_repository import FactorRepository
 from backend.services.data_service import data_service
@@ -24,343 +28,70 @@ class FactorCalculator:
     """因子计算器 - 执行因子计算逻辑"""
 
     def __init__(self):
-        # TALib 函数（注意：SMA 在 mylanguage_funcs 中定义，支持命名参数）
-        self.talib_funcs = {
-            # SMA 不在这里定义，改用 mylanguage_funcs 中的版本
-            "EMA": talib.EMA,
-            "RSI": talib.RSI,
-            "MACD": talib.MACD,
-            "ADX": talib.ADX,
-            "CCI": talib.CCI,
-            "ATR": talib.ATR,
-            "BBANDS": talib.BBANDS,
-            "OBV": talib.OBV,
-            "STOCH": talib.STOCH,
-            "STOCHRSI": talib.STOCHRSI,
-            "WILLR": talib.WILLR,
-            "KAMA": talib.KAMA,
-            "ROC": talib.ROC,
-            "MOM": talib.MOM,
-        }
+        self.engine = formula_engine_manager
 
-        # 麦语言（MyLanguage）函数
-        self.mylanguage_funcs = self._create_mylanguage_funcs()
+    def infer_formula_type(self, factor_code: str, formula_type: Optional[str] = None) -> str:
+        stripped = (factor_code or "").strip()
+        return normalize_formula_type(formula_type, stripped)
 
-    def _create_mylanguage_funcs(self):
-        """创建麦语言兼容函数"""
+    def _prepare_execution_code(self, factor_code: str, formula_type: Optional[str] = None) -> str:
+        """执行前仅规范化 Python 代码，麦语言保留原程序以支持多输出。"""
+        stripped = (factor_code or "").strip()
+        if not stripped:
+            return stripped
 
-        # SMA 包装函数，支持命名参数
-        def SMA(series, timeperiod=30, **kwargs):
-            """简单移动平均"""
-            import talib
-            if isinstance(series, pd.Series):
-                result = talib.SMA(series.values, timeperiod=timeperiod, **kwargs)
-                return pd.Series(result, index=series.index)
-            return talib.SMA(series, timeperiod=timeperiod, **kwargs)
+        resolved_type = normalize_formula_type(formula_type, stripped)
+        if resolved_type == "python":
+            return normalize_formula_code(stripped, formula_type="python")
+        return stripped
 
-        # MA 作为 SMA 的别名
-        def MA(series, timeperiod=30, **kwargs):
-            """移动平均（SMA别名）"""
-            return SMA(series, timeperiod=timeperiod, **kwargs)
-
-        def REF(series, n=1):
-            """引用n日前的值"""
-            if isinstance(series, pd.Series):
-                return series.shift(n)
-            return pd.Series(series).shift(n)
-
-        def HHV(series, n=5):
-            """n日内最高值"""
-            if isinstance(series, pd.Series):
-                return series.rolling(window=n, min_periods=1).max()
-            return pd.Series(series).rolling(window=n, min_periods=1).max()
-
-        def LLV(series, n=5):
-            """n日内最低值"""
-            if isinstance(series, pd.Series):
-                return series.rolling(window=n, min_periods=1).min()
-            return pd.Series(series).rolling(window=n, min_periods=1).min()
-
-        def SUM(series, n=5):
-            """n日总和"""
-            if isinstance(series, pd.Series):
-                return series.rolling(window=n, min_periods=1).sum()
-            return pd.Series(series).rolling(window=n, min_periods=1).sum()
-
-        def AVE(series, n=5):
-            """n日平均值"""
-            if isinstance(series, pd.Series):
-                return series.rolling(window=n, min_periods=1).mean()
-            return pd.Series(series).rolling(window=n, min_periods=1).mean()
-
-        def STD(series, n=5):
-            """n日标准差"""
-            if isinstance(series, pd.Series):
-                return series.rolling(window=n, min_periods=1).std()
-            return pd.Series(series).rolling(window=n, min_periods=1).std()
-
-        def COUNT(condition, n=5):
-            """n日内满足条件的次数"""
-            if isinstance(condition, pd.Series):
-                return condition.rolling(window=n, min_periods=1).sum()
-            return pd.Series(condition).rolling(window=n, min_periods=1).sum()
-
-        def EVERY(condition, n=5):
-            """n日内是否一直满足条件"""
-            if isinstance(condition, pd.Series):
-                return condition.rolling(window=n, min_periods=1).apply(lambda x: x.all(), raw=False)
-            return pd.Series(condition).rolling(window=n, min_periods=1).apply(lambda x: x.all())
-
-        def EXIST(condition, n=5):
-            """n日内是否存在满足条件"""
-            if isinstance(condition, pd.Series):
-                return condition.rolling(window=n, min_periods=1).apply(lambda x: x.any(), raw=False)
-            return pd.Series(condition).rolling(window=n, min_periods=1).apply(lambda x: x.any())
-
-        def CROSS(x, y):
-            """金叉：x上穿y"""
-            if isinstance(x, pd.Series) and isinstance(y, pd.Series):
-                return (x > y) & (x.shift(1) <= y.shift(1))
-            return pd.Series(x > y) & pd.Series(x).shift(1) <= pd.Series(y).shift(1)
-
-        def LONGCROSS(x, y, n=5):
-            """n日内金叉"""
-            if isinstance(x, pd.Series) and isinstance(y, pd.Series):
-                cross = (x > y) & (x.shift(1) <= y.shift(1))
-                return cross.rolling(window=n, min_periods=1).apply(lambda z: z.any(), raw=False)
-            x_series = pd.Series(x)
-            y_series = pd.Series(y)
-            cross = (x_series > y_series) & (x_series.shift(1) <= y_series.shift(1))
-            return cross.rolling(window=n, min_periods=1).apply(lambda z: z.any())
-
-        def UP(series, n=1):
-            """上涨：今日大于n日前"""
-            if isinstance(series, pd.Series):
-                return series > series.shift(n)
-            return pd.Series(series) > pd.Series(series).shift(n)
-
-        def DOWN(series, n=1):
-            """下跌：今日小于n日前"""
-            if isinstance(series, pd.Series):
-                return series < series.shift(n)
-            return pd.Series(series) < pd.Series(series).shift(n)
-
-        def IF(condition, true_value, false_value=0):
-            """条件选择函数"""
-            if isinstance(condition, pd.Series):
-                result = pd.Series(np.where(condition, true_value, false_value), index=condition.index)
-                return result
-            return np.where(condition, true_value, false_value)
-
-        def BETWEEN(series, lower, upper):
-            """区间判断"""
-            if isinstance(series, pd.Series):
-                return (series >= lower) & (series <= upper)
-            return (pd.Series(series) >= lower) & (pd.Series(series) <= upper)
-
-        def MAX(series1, series2):
-            """最大值"""
-            if isinstance(series1, pd.Series) and isinstance(series2, pd.Series):
-                return series1.combine(series2, max)
-            return np.maximum(series1, series2)
-
-        def MIN(series1, series2):
-            """最小值"""
-            if isinstance(series1, pd.Series) and isinstance(series2, pd.Series):
-                return series1.combine(series2, min)
-            return np.minimum(series1, series2)
-
-        def BARSLAST(condition):
-            """上一次满足条件到当前的周期数"""
-            if not isinstance(condition, pd.Series):
-                condition = pd.Series(condition)
-
-            result = pd.Series(0, index=condition.index)
-            last_true_idx = -1
-
-            for i in range(len(condition)):
-                if condition.iloc[i]:
-                    last_true_idx = i
-                    result.iloc[i] = 0
-                elif last_true_idx >= 0:
-                    result.iloc[i] = i - last_true_idx
-                else:
-                    result.iloc[i] = len(condition)
-
-            return result
-
-        def CONST(value, length=100):
-            """常量序列"""
-            return pd.Series([value] * length)
-
-        return {
-            # 移动平均函数
-            "SMA": SMA,
-            "MA": MA,
-            # 引用函数
-            "REF": REF,
-            # 极值函数
-            "HHV": HHV,
-            "LLV": LLV,
-            # 统计函数
-            "SUM": SUM,
-            "AVE": AVE,
-            "STD": STD,
-            "COUNT": COUNT,
-            # 逻辑函数
-            "EVERY": EVERY,
-            "EXIST": EXIST,
-            "CROSS": CROSS,
-            "LONGCROSS": LONGCROSS,
-            "UP": UP,
-            "DOWN": DOWN,
-            # 条件函数
-            "IF": IF,
-            "BETWEEN": BETWEEN,
-            # 数学函数
-            "MAX": MAX,
-            "MIN": MIN,
-            # 其他函数
-            "BARSLAST": BARSLAST,
-            "CONST": CONST,
-        }
-
-    def calculate(self, df: pd.DataFrame, factor_code: str) -> pd.Series:
+    def calculate(self, df: pd.DataFrame, factor_code: str, formula_type: Optional[str] = None) -> pd.Series:
         """
         计算单个因子
 
         Args:
             df: 包含OHLCV数据的DataFrame
-            factor_code: 因子计算代码（支持表达式或函数形式）
+            factor_code: 因子计算代码
+            formula_type: 公式类型（mylanguage / python / auto）
 
         Returns:
             因子值的Series
         """
-        import pandas as pd
+        resolved_type = self.infer_formula_type(factor_code, formula_type)
+        prepared_code = self._prepare_execution_code(factor_code, resolved_type)
+        try:
+            return self.engine.execute(df, prepared_code, resolved_type)
+        except FormulaExecutionError as exc:
+            logger.error("因子计算失败 [%s]: %s", resolved_type, prepared_code, exc_info=True)
+            raise ValueError(f"{resolved_type} 因子计算失败: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001
+            logger.error("因子计算异常 [%s]: %s", resolved_type, prepared_code, exc_info=True)
+            raise ValueError(f"{resolved_type} 因子计算失败: {exc}") from exc
 
-        # 检测是否是函数形式（去除注释和空行后再检查）
-        lines = factor_code.strip().split('\n')
-        code_lines = [line for line in lines if line.strip() and not line.strip().startswith('#')]
-        is_function = len(code_lines) > 0 and code_lines[0].strip().startswith("def ")
-
-        if is_function:
-            # 函数形式：使用 exec 执行函数定义，然后调用函数
-            # 提供完整的全局变量，包括 pandas, numpy 和常见函数
-            global_vars = {
-                "__builtins__": {
-                    "__import__": __import__,
-                    "abs": abs, "min": min, "max": max, "len": len,
-                    "range": range, "float": float, "int": int, "bool": bool,
-                    "list": list, "tuple": tuple, "dict": dict, "sum": sum,
-                    "any": any, "all": all, "enumerate": enumerate, "zip": zip,
-                    "round": round, "pow": pow, "divmod": divmod,
-                },
-                "pd": pd,
-                "np": np,
-                **self.talib_funcs,
-                **self.mylanguage_funcs,
-            }
-
-            local_vars = {}
-
-            try:
-                # 执行函数定义
-                # 注意：此处在受限环境中执行用户代码
-                # global_vars已经限制了可用的内置函数
-                exec(factor_code, global_vars, local_vars)
-
-                # 调用函数（函数可能在 global_vars 或 local_vars 中）
-                calc_func = local_vars.get("calculate_factor") or global_vars.get("calculate_factor")
-                if calc_func is None:
-                    raise ValueError("函数代码中未找到 'calculate_factor' 函数定义")
-
-                result = calc_func(df)
-
-                if isinstance(result, pd.DataFrame):
-                    # 如果返回DataFrame，取第一列
-                    result = result.iloc[:, 0]
-                elif not isinstance(result, pd.Series):
-                    raise ValueError(f"函数必须返回 pd.Series，实际返回了 {type(result)}")
-
-                return result
-            except Exception as e:
-                import traceback
-                # 记录详细错误信息用于调试
-                error_msg = f"因子计算失败: {str(e)}\n"
-                error_msg += f"因子代码类型: {'函数' if is_function else '表达式'}\n"
-                error_msg += f"代码长度: {len(factor_code)} 字符"
-                # 在开发环境可以添加traceback，生产环境使用日志
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.error(error_msg, exc_info=True)
-                raise ValueError(error_msg)
-        else:
-            # 表达式形式：使用 eval 执行（保持向后兼容）
-            local_vars = {
-                "df": df,
-                "open": df["open"],
-                "high": df["high"],
-                "low": df["low"],
-                "close": df["close"],
-                "volume": df["volume"],
-                # 麦语言价格别名（大写）
-                "C": df["close"],  # CLOSE
-                "O": df["open"],   # OPEN
-                "H": df["high"],   # HIGH
-                "L": df["low"],    # LOW
-                "V": df["volume"], # VOLUME
-                "CLOSE": df["close"],
-                "OPEN": df["open"],
-                "HIGH": df["high"],
-                "LOW": df["low"],
-                "VOL": df["volume"],
-                # Python内置函数
-                "int": int,
-                "float": float,
-                "bool": bool,
-                "str": str,
-                "list": list,
-                "tuple": tuple,
-                "dict": dict,
-                "set": set,
-                "len": len,
-                "range": range,
-                # NumPy
-                "np": np,
-                **self.talib_funcs,
-                **self.mylanguage_funcs,
-            }
-
-            try:
-                # 安全措施：
-                # 1. 限制__builtins__为空字典
-                # 2. 只提供预定义的local_vars
-                # 3. 使用ast验证代码语法
-                import ast
-                try:
-                    ast.parse(factor_code, mode='eval')
-                except SyntaxError:
-                    raise ValueError(f"因子表达式语法错误: {factor_code}")
-
-                result = eval(factor_code, {"__builtins__": {}}, local_vars)
-
-                # 处理不同类型的返回结果
-                if isinstance(result, pd.DataFrame):
-                    # 如果返回DataFrame，取第一列
-                    result = result.iloc[:, 0]
-                elif isinstance(result, (int, float)):
-                    # 如果是标量值，转换为Series
-                    result = pd.Series([result] * len(df), index=df.index)
-                elif not isinstance(result, pd.Series):
-                    # 其他类型尝试转换
-                    result = pd.Series(result)
-
-                return result
-            except Exception as e:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.error(f"因子表达式计算失败: {factor_code}", exc_info=True)
-                raise ValueError(f"因子表达式计算失败: {e}")
+    def calculate_with_metadata(
+        self,
+        df: pd.DataFrame,
+        factor_code: str,
+        formula_type: Optional[str] = None,
+    ) -> FormulaExecutionResult:
+        """计算因子并返回主输出与绘图输出。"""
+        resolved_type = self.infer_formula_type(factor_code, formula_type)
+        prepared_code = self._prepare_execution_code(factor_code, resolved_type)
+        try:
+            result = self.engine.execute_with_metadata(df, prepared_code, resolved_type)
+            if result.formula_type != resolved_type:
+                return FormulaExecutionResult(
+                    primary=result.primary,
+                    plots=result.plots,
+                    formula_type=resolved_type,
+                )
+            return result
+        except FormulaExecutionError as exc:
+            logger.error("因子计算失败 [%s]: %s", resolved_type, prepared_code, exc_info=True)
+            raise ValueError(f"{resolved_type} 因子计算失败: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001
+            logger.error("因子计算异常 [%s]: %s", resolved_type, prepared_code, exc_info=True)
+            raise ValueError(f"{resolved_type} 因子计算失败: {exc}") from exc
 
     def calculate_multiple(
         self, df: pd.DataFrame, factors: List[FactorModel]
@@ -379,7 +110,7 @@ class FactorCalculator:
 
         for factor in factors:
             try:
-                factor_values = self.calculate(df, factor.code)
+                factor_values = self.calculate(df, factor.code, getattr(factor, "formula_type", None))
                 result[factor.name] = factor_values
             except Exception as e:
                 logger.warning(f"计算因子 {factor.name} 失败: {e}")
@@ -450,50 +181,57 @@ class FactorService:
             self._create_default_preset_factors()
             return
 
-        db = get_db_session()
-        repo = FactorRepository(db)
-
-        for category, factors in config.items():
-            for factor_data in factors:
-                # 检查因子是否已存在
-                existing = repo.get_by_name(factor_data["name"])
-                if existing:
-                    continue
-
-                factor = FactorModel(
-                    name=factor_data["name"],
-                    code=factor_data["code"],
-                    description=factor_data.get("description", ""),
-                    source="preset",
-                    category=category,
-                    is_active=1,
-                )
-                repo.create(factor)
-
-        db.close()
+        self._sync_preset_factors(config)
 
     def _create_default_preset_factors(self) -> None:
         """创建默认预置因子"""
-        preset_factors = self._get_default_factors()
+        self._sync_preset_factors(self._get_default_factors())
+
+    def _sync_preset_factors(self, preset_factors: Dict[str, List[Dict]]) -> None:
+        """将预置因子定义同步到数据库。"""
         db = get_db_session()
         repo = FactorRepository(db)
 
-        for category, factors in preset_factors.items():
-            for factor_data in factors:
-                existing = repo.get_by_name(factor_data["name"])
-                if existing:
-                    continue
-                factor = FactorModel(
-                    name=factor_data["name"],
-                    code=factor_data["code"],
-                    description=factor_data.get("description", ""),
-                    source="preset",
-                    category=category,
-                    is_active=1,
-                )
-                repo.create(factor)
+        try:
+            for category, factors in preset_factors.items():
+                for factor_data in factors:
+                    resolved_type = factor_data.get("formula_type", infer_formula_type(factor_data["code"]))
+                    existing = repo.get_by_name(factor_data["name"], include_inactive=True)
 
-        db.close()
+                    if existing is None:
+                        factor = FactorModel(
+                            name=factor_data["name"],
+                            code=factor_data["code"],
+                            formula_type=resolved_type,
+                            description=factor_data.get("description", ""),
+                            source="preset",
+                            category=category,
+                            is_active=1,
+                        )
+                        repo.create(factor)
+                        continue
+
+                    if existing.source != "preset":
+                        logger.warning("跳过预置因子同步，名称被用户因子占用: %s", factor_data["name"])
+                        continue
+
+                    changed = False
+                    desired_values = {
+                        "code": factor_data["code"],
+                        "formula_type": resolved_type,
+                        "description": factor_data.get("description", ""),
+                        "category": category,
+                        "is_active": 1,
+                    }
+                    for field, desired in desired_values.items():
+                        if getattr(existing, field) != desired:
+                            setattr(existing, field, desired)
+                            changed = True
+
+                    if changed:
+                        repo.update(existing)
+        finally:
+            db.close()
 
     def _get_default_factors(self) -> Dict[str, List[Dict]]:
         """获取默认预置因子定义"""
@@ -774,7 +512,7 @@ class FactorService:
                 },
                 {
                     "name": "max_drawdown_20",
-                    "code": "close.rolling(window=20).apply(lambda x: (x - x.cummax()).min() / x.cummax().max())",
+                    "code": "MAXDRAWDOWN(close, 20)",
                     "description": "20日最大回撤",
                 },
                 {
@@ -838,12 +576,12 @@ class FactorService:
             "价格位置": [
                 {
                     "name": "percentile_20",
-                    "code": "close.rolling(window=20).apply(lambda x: (x.iloc[-1] - x.min()) / (x.max() - x.min()))",
+                    "code": "RANGEPOS(close, 20)",
                     "description": "20日价格分位数（当前价格在20日区间中的位置）",
                 },
                 {
                     "name": "percentile_60",
-                    "code": "close.rolling(window=60).apply(lambda x: (x.iloc[-1] - x.min()) / (x.max() - x.min()))",
+                    "code": "RANGEPOS(close, 60)",
                     "description": "60日价格分位数（当前价格在60日区间中的位置）",
                 },
                 {
@@ -911,6 +649,7 @@ class FactorService:
 
         # 获取缓存统计
         from backend.services.cache_service import cache_service
+        from backend.services.strategy_registry import strategy_registry
         cache_stats = cache_service.get_stats()
         stock_cache_count = cache_stats.get("total_count", 0)
 
@@ -932,16 +671,182 @@ class FactorService:
             "preset_count": repo.get_preset_count(),
             "user_count": repo.get_user_count(),
             "total_count": repo.get_preset_count() + repo.get_user_count(),
-            "strategy_count": 0,  # 暂时为0，后续可以根据实际情况添加
+            "strategy_count": len(strategy_registry.list_strategies()),
             "stock_cache_count": stock_cache_count,
             "akshare_healthy": akshare_healthy,
         }
         db.close()
         return stats
 
+    def cleanup_legacy_generated_factors(self) -> Dict[str, Any]:
+        """清理历史自动生成的旧版 Python 包装因子。"""
+        db = get_db_session()
+        repo = FactorRepository(db)
+        summary = {
+            "scanned": 0,
+            "migrated": 0,
+            "deleted": 0,
+            "skipped": 0,
+            "migrated_names": [],
+            "deleted_names": [],
+        }
+
+        try:
+            for factor in repo.get_all(source="user", active_only=False):
+                summary["scanned"] += 1
+
+                if not self._is_legacy_generated_python_factor(factor):
+                    summary["skipped"] += 1
+                    continue
+
+                migrated_expression = self._extract_generated_expression(factor.code)
+                if migrated_expression:
+                    factor.code = migrated_expression
+                    factor.formula_type = infer_formula_type(migrated_expression)
+                    repo.update(factor)
+                    summary["migrated"] += 1
+                    summary["migrated_names"].append(factor.name)
+                    continue
+
+                repo.delete(factor.id)
+                summary["deleted"] += 1
+                summary["deleted_names"].append(factor.name)
+        finally:
+            db.close()
+
+        return summary
+
+    def _is_legacy_generated_python_factor(self, factor: FactorModel) -> bool:
+        code = (factor.code or "").strip()
+        if factor.source != "user":
+            return False
+
+        if factor.category in {"遗传挖掘", "组合因子"}:
+            if "def calculate_factor" in code:
+                return True
+            if re.fullmatch(r"factor_\d+", code):
+                return True
+
+        if not code.startswith("def calculate_factor"):
+            return False
+
+        legacy_markers = (
+            "遗传算法挖掘因子",
+            "组合因子 - ",
+            "通过遗传算法挖掘的因子",
+        )
+        return any(marker in code or marker in (factor.description or "") for marker in legacy_markers)
+
+    def _extract_generated_expression(self, code: str) -> Optional[str]:
+        match = re.search(r"^\s*表达式:\s*(.+?)\s*$", code, flags=re.MULTILINE)
+        if not match:
+            return None
+        expression = match.group(1).strip()
+        return expression or None
+
+    def repair_stored_factor_codes(self) -> Dict[str, Any]:
+        """扫描并修复库中历史坏因子的持久化代码内容。"""
+        db = get_db_session()
+        repo = FactorRepository(db)
+        summary = {
+            "scanned": 0,
+            "repaired": 0,
+            "unchanged": 0,
+            "failed": 0,
+            "repaired_items": [],
+            "failed_items": [],
+        }
+
+        try:
+            for factor in repo.get_all(source=None, active_only=False):
+                summary["scanned"] += 1
+                previous_formula_type = factor.formula_type
+                try:
+                    repaired = self._repair_factor_storage_record(factor)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("修复历史因子失败: id=%s name=%s", factor.id, factor.name)
+                    summary["failed"] += 1
+                    summary["failed_items"].append(
+                        {
+                            "id": factor.id,
+                            "name": factor.name,
+                            "category": factor.category,
+                            "formula_type": factor.formula_type,
+                            "error": str(exc),
+                        }
+                    )
+                    continue
+
+                if repaired is None:
+                    summary["unchanged"] += 1
+                    continue
+
+                factor.code = repaired["code"]
+                factor.formula_type = repaired["formula_type"]
+                repo.update(factor)
+                summary["repaired"] += 1
+                summary["repaired_items"].append(
+                    {
+                        "id": factor.id,
+                        "name": factor.name,
+                        "category": factor.category,
+                        "old_formula_type": previous_formula_type,
+                        "new_formula_type": repaired["formula_type"],
+                        "reasons": repaired["reasons"],
+                    }
+                )
+        finally:
+            db.close()
+
+        return summary
+
+    def _repair_factor_storage_record(self, factor: FactorModel) -> Optional[Dict[str, Any]]:
+        """修复单个因子的库内存储内容，保持合法麦语言程序不被压缩。"""
+        original_code = (factor.code or "").strip()
+        original_formula_type = (factor.formula_type or "").strip() or "auto"
+        repaired_code = original_code
+        repaired_formula_type = original_formula_type
+        reasons: List[str] = []
+
+        if self._is_legacy_generated_python_factor(factor):
+            migrated_expression = self._extract_generated_expression(original_code)
+            if migrated_expression:
+                repaired_code = normalize_formula_code(migrated_expression, formula_type="python")
+                repaired_formula_type = normalize_formula_type("auto", repaired_code)
+                reasons.append("legacy_generated_expression")
+
+        normalized_code = self._prepare_factor_code_for_storage(
+            repaired_code,
+            formula_type=repaired_formula_type,
+        )
+        if normalized_code != repaired_code:
+            repaired_code = normalized_code
+            reasons.append("normalized_storage_code")
+
+        resolved_formula_type = self._resolve_stored_formula_type(
+            repaired_code,
+            formula_type=repaired_formula_type,
+        )
+        if resolved_formula_type != repaired_formula_type:
+            repaired_formula_type = resolved_formula_type
+            reasons.append("normalized_formula_type")
+
+        is_valid, message = self.validate_factor_code(repaired_code, formula_type=repaired_formula_type)
+        if not is_valid:
+            raise ValueError(message)
+
+        if repaired_code == original_code and repaired_formula_type == original_formula_type:
+            return None
+
+        return {
+            "code": repaired_code,
+            "formula_type": repaired_formula_type,
+            "reasons": reasons,
+        }
+
     def create_factor(
         self, name: str, code: str, description: str = "",
-        category: str = "自定义", formula_type: str = "expression"
+        category: str = "自定义", formula_type: str = "auto"
     ) -> Dict:
         """创建用户自定义因子"""
         db = get_db_session()
@@ -964,9 +869,14 @@ class FactorService:
                 db.execute(stmt)
                 db.commit()
 
+        stored_code = self._prepare_factor_code_for_storage(code, formula_type=formula_type)
+        resolved_type = self._resolve_stored_formula_type(stored_code, formula_type=formula_type)
+        self._ensure_factor_code_is_valid(stored_code, resolved_type)
+
         factor = FactorModel(
             name=name,
-            code=code,
+            code=stored_code,
+            formula_type=resolved_type,
             description=description,
             source="user",
             category=category,
@@ -978,7 +888,7 @@ class FactorService:
 
     def update_factor(
         self, factor_id: int, name: str = None, code: str = None, description: str = None,
-        category: str = None, create_version: bool = True, change_reason: str = ""
+        category: str = None, formula_type: str = None, create_version: bool = True, change_reason: str = ""
     ) -> Dict:
         """
         更新因子
@@ -1006,6 +916,12 @@ class FactorService:
             db.close()
             raise ValueError("预置因子的名称和代码不能修改")
 
+        if name and name != factor.name:
+            existing_factor = repo.get_by_name(name, include_inactive=True)
+            if existing_factor and existing_factor.id != factor_id:
+                db.close()
+                raise ValueError(f"因子名称 '{name}' 已存在")
+
         # 如果需要创建版本且代码有变化，先保存版本
         if create_version and code and code != factor.code:
             try:
@@ -1019,15 +935,34 @@ class FactorService:
             except Exception as e:
                 logger.warning(f"创建版本快照失败: {e}")
 
+        proposed_code = code if code is not None else factor.code
+        stored_code = self._prepare_factor_code_for_storage(proposed_code, formula_type=formula_type)
+        if formula_type is not None:
+            proposed_formula_type = self._resolve_stored_formula_type(stored_code, formula_type=formula_type)
+        elif code is not None:
+            proposed_formula_type = self._resolve_stored_formula_type(stored_code, formula_type=None)
+        else:
+            proposed_formula_type = factor.formula_type or self._resolve_stored_formula_type(stored_code, formula_type=None)
+
+        if code is not None or formula_type is not None:
+            self._ensure_factor_code_is_valid(stored_code, proposed_formula_type)
+
         # 更新因子
         if name:
             factor.name = name
         if code:
-            factor.code = code
+            factor.code = stored_code
         if description is not None:
             factor.description = description
         if category:
             factor.category = category
+        if formula_type:
+            factor.formula_type = self._resolve_stored_formula_type(
+                stored_code if code is not None else factor.code,
+                formula_type=formula_type,
+            )
+        elif code:
+            factor.formula_type = self._resolve_stored_formula_type(stored_code, formula_type=None)
 
         result = repo.update(factor)
         db.close()
@@ -1053,7 +988,7 @@ class FactorService:
             db.close()
             raise e
 
-    def validate_factor_code(self, code: str) -> tuple[bool, str]:
+    def validate_factor_code(self, code: str, formula_type: Optional[str] = None) -> tuple[bool, str]:
         """验证因子代码"""
         # 使用logging记录调试信息（可通过配置关闭）
         logger.debug(f"Validating factor code, length: {len(code)}")
@@ -1066,11 +1001,15 @@ class FactorService:
             "low": np.linspace(9.0, 10.0, 100),
             "close": np.linspace(10.5, 11.5, 100),
             "volume": np.linspace(1000000, 1100000, 100),
+            "amount": np.linspace(10000000, 11000000, 100),
         })
+        test_df.index = pd.date_range("2024-01-01", periods=len(test_df), freq="D")
 
         try:
+            prepared_code = self._prepare_factor_code(code, formula_type=formula_type)
+            resolved_type = normalize_formula_type(formula_type, prepared_code)
             calculator = FactorCalculator()
-            result = calculator.calculate(test_df, code)
+            result = calculator.calculate(test_df, prepared_code, resolved_type)
 
             # 检查结果
             if result is None or len(result) == 0:
@@ -1092,17 +1031,19 @@ class FactorService:
                 logger.warning(f"Factor result has only one unique value: {valid_result.iloc[0]}")
                 # 不返回错误，只记录警告，因为有些有效的因子可能确实是常量
 
-            return True, "验证通过"
+            return True, f"验证通过（类型: {resolved_type}）"
 
         except ValueError as e:
             # 捕获因子计算错误
             logger.debug(f"Factor code validation failed: {str(e)}", exc_info=True)
-            return False, str(e)
+            resolved_type = normalize_formula_type(formula_type, (code or "").strip())
+            return False, self._friendly_validation_error(str(e), resolved_type, (code or "").strip())
         except Exception as e:
             # 捕获其他错误（如 NameError、SyntaxError 等）
             logger.debug(f"Factor code validation failed: {str(e)}", exc_info=True)
             # 提供更友好的错误信息
             error_msg = str(e)
+            resolved_type = normalize_formula_type(formula_type, (code or "").strip())
 
             # 检查常见错误模式
             if "is not defined" in error_msg:
@@ -1115,7 +1056,7 @@ class FactorService:
                     suggestions = []
 
                     # 检查是否是常见变量名的拼写错误
-                    common_vars = {'close', 'open', 'high', 'low', 'volume', 'np'}
+                    common_vars = {'close', 'open', 'high', 'low', 'volume', 'amount', 'np', 'pd'}
                     for var in common_vars:
                         if undefined_name.lower() == var.lower() or undefined_name.lower() in var:
                             suggestions.append(f"变量名：{var}")
@@ -1162,7 +1103,90 @@ class FactorService:
 
                     return False, f"未定义的名称 '{undefined_name}'，请检查拼写。常见变量名：close, open, high, low, volume"
 
-            return False, f"验证失败: {error_msg}"
+            return False, self._friendly_validation_error(f"验证失败: {error_msg}", resolved_type, (code or "").strip())
+
+    def _friendly_validation_error(self, error_message: str, resolved_type: str, code: str) -> str:
+        if resolved_type == "python":
+            if "Python 指标不支持 AST 节点: Lambda" in error_message:
+                return "当前 Python 因子不支持 lambda 表达式，请改写为系统函数或普通表达式"
+            if "RollingWindow 不允许访问属性 apply" in error_message:
+                return "当前 Python 因子不支持 rolling(...).apply(...)，请改写为系统函数或显式表达式写法"
+            if "Python 指标不支持 AST 节点: ListComp" in error_message or "Python 指标不支持 AST 节点: DictComp" in error_message or "Python 指标不支持 AST 节点: SetComp" in error_message or "Python 指标不支持 AST 节点: GeneratorExp" in error_message:
+                return "当前 Python 因子不支持推导式或生成器表达式，请改写为普通表达式"
+            if "Python 指标不支持语句类型: For" in error_message or "Python 指标不支持语句类型: While" in error_message:
+                return "当前 Python 因子不支持 for / while 循环，请改写为向量化表达式"
+            if "Python 指标不支持语句类型: With" in error_message:
+                return "当前 Python 因子不支持 with 语句"
+            if "Python 指标暂不支持链式比较" in error_message:
+                return "当前 Python 因子不支持链式比较，请拆成两个独立比较后再组合"
+            if "Python 指标不允许使用 from ... import ..." in error_message:
+                return "当前 Python 因子不支持 from ... import ...，如需导入仅可使用 import pandas / import numpy"
+            if "Python 指标仅支持简单变量赋值" in error_message or "Python 指标仅支持简单变量增强赋值" in error_message:
+                return "当前 Python 因子仅支持简单变量赋值，不支持解构赋值或复杂目标赋值"
+            if "Series 不允许访问属性" in error_message or "RollingWindow 不允许访问属性" in error_message or "ExpandingWindow 不允许访问属性" in error_message:
+                return (
+                    "当前 Python 因子使用了未开放的方法。支持的序列方法主要包括 "
+                    "shift/diff/pct_change/abs/round/fillna/clip/astype/mean/std/max/min/"
+                    "median/sum/skew/kurt/quantile/rank/rolling/expanding/ffill/bfill/replace"
+                )
+
+        if resolved_type == "mylanguage":
+            if "." in code and ("麦语言词法错误" in error_message or "麦语言语法错误" in error_message):
+                return "当前麦语言不支持对象点号语法，请改用 MA(CLOSE, 20)、REF(CLOSE, 1) 这类函数式写法"
+
+        return error_message
+
+    def _ensure_factor_code_is_valid(self, code: str, formula_type: Optional[str] = None) -> str:
+        """在写库前强制校验因子代码。"""
+        prepared_code = self._prepare_factor_code(code, formula_type=formula_type)
+        resolved_type = normalize_formula_type(formula_type, prepared_code)
+        is_valid, message = self.validate_factor_code(prepared_code, formula_type=resolved_type)
+        if not is_valid:
+            raise ValueError(f"因子代码校验失败: {message}")
+        return resolved_type
+
+    def _prepare_factor_code(self, code: str, formula_type: Optional[str] = None) -> str:
+        """执行和校验前统一规范化公式代码。"""
+        stripped = (code or "").strip()
+        if not stripped:
+            return stripped
+
+        resolved_type = normalize_formula_type(formula_type, stripped)
+        if resolved_type == "python":
+            prepared_code = normalize_formula_code(stripped, formula_type="python")
+        else:
+            prepared_code = stripped
+
+        if prepared_code != (code or "").strip():
+            logger.info("因子代码已规范化: %s -> %s", (code or "").strip(), prepared_code)
+        return prepared_code
+
+    def _prepare_factor_code_for_storage(self, code: str, formula_type: Optional[str] = None) -> str:
+        """写库前仅修复历史坏模式，不压缩合法麦语言程序。"""
+        stripped = (code or "").strip()
+        if not stripped:
+            return stripped
+
+        resolved_type = self._resolve_stored_formula_type(stripped, formula_type=formula_type)
+        if resolved_type == "python":
+            prepared_code = normalize_formula_code(stripped, formula_type="python")
+        else:
+            prepared_code = stripped
+
+        if prepared_code != stripped:
+            logger.info("因子代码已修复入库格式: %s -> %s", stripped, prepared_code)
+        return prepared_code
+
+    def _resolve_stored_formula_type(self, code: str, formula_type: Optional[str] = None) -> str:
+        """推断写库时应持久化的公式类型。"""
+        stripped = (code or "").strip()
+        if not stripped:
+            return normalize_formula_type(formula_type, stripped)
+
+        declared_type = (formula_type or "").strip().lower()
+        if declared_type in {"mylanguage", "python"}:
+            return declared_type
+        return infer_formula_type(stripped)
 
     def calculate_factors_for_stock(
         self,

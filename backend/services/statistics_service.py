@@ -6,6 +6,7 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 from scipy import stats
 from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import LinearRegression
 import warnings
 import logging
 
@@ -175,7 +176,12 @@ class StatisticsService:
         # 按周期重采样
         periodic_ic = {}
 
-        for period_name, factor_group in factor_data.resample(period):
+        normalized_period = self._normalize_resample_period(period)
+
+        for period_name, factor_group in factor_data.resample(normalized_period):
+            if len(factor_group) == 0:
+                continue
+
             # 获取对应区间的收益数据
             start_idx = factor_group.index[0]
             end_idx = factor_group.index[-1]
@@ -184,10 +190,9 @@ class StatisticsService:
             return_group = return_data[return_mask]
 
             # 对齐并计算IC
-            if len(factor_group) > 0 and len(return_group) > 0:
-                aligned_idx = factor_group.index.intersection(return_group.index)
-                if len(aligned_idx) > 10:
-                    ic = factor_group.loc[aligned_idx].corr(return_group.loc[aligned_idx])
+            if len(return_group) > 0:
+                ic = self._calculate_aligned_correlation(factor_group, return_group)
+                if ic is not None:
                     periodic_ic[str(period_name.date())] = ic
 
         return periodic_ic
@@ -211,7 +216,7 @@ class StatisticsService:
             min_periods = max(1, window // 4)
             rolling_mean = ic_series.rolling(window=window, min_periods=min_periods).mean()
             rolling_std = ic_series.rolling(window=window, min_periods=min_periods).std()
-            rolling_ir = rolling_mean / rolling_std
+            rolling_ir = rolling_mean / rolling_std.replace(0, np.nan)
 
             results[f"window_{window}"] = {
                 "mean_ic": rolling_mean.iloc[-1] if len(rolling_mean) > 0 else np.nan,
@@ -241,13 +246,8 @@ class StatisticsService:
             return_df = return_data.get(regime)
 
             if return_df is not None:
-                # 计算IC
-                aligned_idx = factor_df.index.intersection(return_df.index)
-                if len(aligned_idx) > 10:
-                    ic = factor_df.loc[aligned_idx].corr(return_df.loc[aligned_idx])
-                    results[regime] = ic
-                else:
-                    results[regime] = np.nan
+                ic = self._calculate_aligned_correlation(factor_df, return_df)
+                results[regime] = ic if ic is not None else np.nan
 
         return results
 
@@ -273,28 +273,72 @@ class StatisticsService:
         # 删除缺失值
         factor_df = factor_df.dropna()
 
-        if len(factor_df) < 10:
-            return {"interaction_features": [], "feature_importance": {}}
+        target_column = self._resolve_target_column(df, factor_names)
+        if target_column is None:
+            return {
+                "interaction_features": [],
+                "feature_importance": {},
+                "error": "缺少目标收益列（如 future_return、return、future_return_1）",
+            }
+
+        interaction_frame = factor_df.copy()
+        interaction_frame[target_column] = df[target_column]
+        interaction_frame = interaction_frame.dropna()
+
+        if len(interaction_frame) < 10:
+            return {
+                "interaction_features": [],
+                "feature_importance": {},
+                "error": "有效样本不足，无法分析交互效应",
+            }
 
         # 创建多项式特征（包含交互项）
         poly = PolynomialFeatures(degree=degree, include_bias=False)
-        poly_features = poly.fit_transform(factor_df)
+        poly_features = poly.fit_transform(interaction_frame[factor_names])
 
         # 获取特征名称
         feature_names = poly.get_feature_names_out(factor_names)
 
-        # 计算每个特征与目标变量的相关性（这里简化处理）
+        y = interaction_frame[target_column].astype(float)
+        feature_matrix = pd.DataFrame(
+            poly_features,
+            columns=feature_names,
+            index=interaction_frame.index,
+        )
+
+        model = LinearRegression()
+        model.fit(feature_matrix, y)
+
+        coefficient_series = pd.Series(model.coef_, index=feature_names, dtype=float)
+        standardized_features = (
+            feature_matrix - feature_matrix.mean()
+        ) / feature_matrix.std(ddof=0).replace(0, np.nan)
+        standardized_coefficients = coefficient_series * standardized_features.std(ddof=0).fillna(0.0)
+
         interaction_results = {}
         for i, feat_name in enumerate(feature_names):
+            feature_series = feature_matrix[feat_name]
+            correlation = feature_series.corr(y)
             interaction_results[feat_name] = {
                 "index": i,
                 "is_interaction": " " in feat_name and "^2" not in feat_name,
                 "is_squared": "^2" in feat_name,
+                "coefficient": float(coefficient_series.loc[feat_name]),
+                "standardized_coefficient": float(standardized_coefficients.loc[feat_name]),
+                "correlation_with_target": float(correlation) if pd.notna(correlation) else np.nan,
             }
+
+        importance_series = standardized_coefficients.abs().sort_values(ascending=False)
 
         return {
             "interaction_features": feature_names.tolist(),
             "feature_info": interaction_results,
+            "feature_importance": {
+                feature_name: float(importance)
+                for feature_name, importance in importance_series.items()
+            },
+            "target_column": target_column,
+            "r_squared": float(model.score(feature_matrix, y)),
         }
 
     def calculate_factor_correlation_matrix(
@@ -442,3 +486,63 @@ class StatisticsService:
             "autocorrelations": autocorrs,
             "mean_abs_autocorr": np.mean(np.abs(autocorrs)),
         }
+
+    def _calculate_aligned_correlation(
+        self,
+        factor_values: pd.Series | pd.DataFrame,
+        return_values: pd.Series | pd.DataFrame,
+    ) -> Optional[float]:
+        """对齐后计算单一因子与单一收益序列的相关系数。"""
+        factor_series = self._coerce_to_series(factor_values, "factor")
+        return_series = self._coerce_to_series(return_values, "return")
+
+        aligned = pd.DataFrame(
+            {
+                "factor": factor_series,
+                "return": return_series,
+            }
+        ).dropna()
+
+        if len(aligned) <= 10:
+            return None
+
+        ic = aligned["factor"].corr(aligned["return"])
+        if pd.isna(ic):
+            return None
+        return float(ic)
+
+    def _coerce_to_series(
+        self,
+        values: pd.Series | pd.DataFrame,
+        default_name: str,
+    ) -> pd.Series:
+        """将 Series 或单列 DataFrame 转为 Series。"""
+        if isinstance(values, pd.Series):
+            return values.rename(default_name)
+        if isinstance(values, pd.DataFrame):
+            if values.shape[1] == 0:
+                return pd.Series(dtype=float, name=default_name)
+            if values.shape[1] == 1:
+                return values.iloc[:, 0].rename(values.columns[0])
+            numeric_columns = values.select_dtypes(include=[np.number]).columns
+            if len(numeric_columns) == 0:
+                return pd.Series(dtype=float, name=default_name)
+            return values[numeric_columns[0]].rename(numeric_columns[0])
+        raise TypeError(f"不支持的数据类型: {type(values)}")
+
+    def _resolve_target_column(self, df: pd.DataFrame, factor_names: List[str]) -> Optional[str]:
+        """解析交互效应分析使用的目标列。"""
+        preferred_columns = ["future_return", "future_return_1", "return", "target"]
+        for column in preferred_columns:
+            if column in df.columns and column not in factor_names:
+                return column
+        return None
+
+    def _normalize_resample_period(self, period: str) -> str:
+        """兼容 pandas 新版本的重采样频率写法。"""
+        period_map = {
+            "M": "ME",
+            "Q": "QE",
+            "Y": "YE",
+        }
+        return period_map.get(period, period)

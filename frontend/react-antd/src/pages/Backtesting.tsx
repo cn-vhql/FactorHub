@@ -1,5 +1,4 @@
 import React, { useState, useRef, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
 import BacktestCharts from '../components/BacktestCharts'
 import {
   Card,
@@ -34,7 +33,7 @@ import {
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import type { Dayjs } from 'dayjs'
-import * as echarts from 'echarts'
+import * as echarts from '@/utils/echarts'
 import axios from 'axios'
 import './Backtesting.css'
 
@@ -62,11 +61,30 @@ interface BacktestConfig {
   shares_per_trade: number
 }
 
+interface BacktestFormValues {
+  data_mode: 'single' | 'pool'
+  stock_code?: string
+  stock_codes?: string
+  dateRange: [Dayjs, Dayjs]
+  factor_name?: string
+  factor_names?: string[]
+  strategy_type: 'single_factor' | 'multi_factor'
+  initial_capital: number
+  commission_rate: number
+  slippage: number
+  percentile: number
+  direction: 'long' | 'short'
+  weight_method?: string
+  shares_per_trade: number
+}
+
 interface StrategyTemplate {
   id: number
   name: string
   description: string
-  config: BacktestConfig
+  config: Omit<BacktestFormValues, 'dateRange'> & {
+    dateRange?: [string, string]
+  }
   created_at: string
 }
 
@@ -91,10 +109,8 @@ interface BacktestResult {
 // ========== 组件 ==========
 
 const Backtesting: React.FC = () => {
-  const navigate = useNavigate()
-
   // ========== 状态管理 ==========
-  const [form] = Form.useForm()
+  const [form] = Form.useForm<BacktestFormValues>()
   const [loading, setLoading] = useState(false)
   const [factors, setFactors] = useState<any[]>([])
 
@@ -158,7 +174,7 @@ const Backtesting: React.FC = () => {
   }
 
   // ========== 单策略回测 ==========
-  const runSingleBacktest = async (values: any) => {
+  const runSingleBacktest = async (values: BacktestFormValues) => {
     const [startDate, endDate] = values.dateRange
 
     // 处理因子选择：单因子或多因子
@@ -173,14 +189,14 @@ const Backtesting: React.FC = () => {
     } else {
       // 单因子策略
       factorName = values.factor_name
-      factorNames = [factorName]
+      factorNames = factorName ? [factorName] : []
     }
 
     const config: BacktestConfig = {
       data_mode: values.data_mode,
       stock_codes: values.data_mode === 'single'
-        ? [values.stock_code]
-        : values.stock_codes.split('\n').filter((s: string) => s.trim()),
+        ? (values.stock_code ? [values.stock_code] : [])
+        : (values.stock_codes?.split('\n').filter((s: string) => s.trim()) ?? []),
       start_date: startDate.format('YYYY-MM-DD'),
       end_date: endDate.format('YYYY-MM-DD'),
       factor_name: factorName,
@@ -383,18 +399,22 @@ const Backtesting: React.FC = () => {
       const values = await form.validateFields()
 
       // 将 Dayjs 对象转换为 ISO 字符串以便存储
-      const configToSave = { ...values }
+      const configToSave = {
+        ...values
+      } as Omit<StrategyTemplate['config'], 'dateRange'> & {
+        dateRange?: BacktestFormValues['dateRange'] | [string, string]
+      }
       if (configToSave.dateRange && Array.isArray(configToSave.dateRange)) {
         configToSave.dateRange = configToSave.dateRange.map((d: any) =>
-          d instanceof dayjs ? d.toISOString() : d
-        )
+          dayjs.isDayjs(d) ? d.toISOString() : String(d)
+        ) as [string, string]
       }
 
       const strategy: StrategyTemplate = {
         id: Date.now(),
         name: currentStrategyName || `策略_${dayjs().format('YYYYMMDD_HHmmss')}`,
         description: `${values.strategy_type === 'single_factor' ? '单因子' : '多因子'}策略`,
-        config: configToSave,
+        config: configToSave as StrategyTemplate['config'],
         created_at: new Date().toISOString()
       }
 
@@ -424,24 +444,29 @@ const Backtesting: React.FC = () => {
       // 处理 dateRange 字段（从 localStorage 读取的需要转换）
       if (config.dateRange) {
         if (Array.isArray(config.dateRange) && config.dateRange.length === 2) {
-          // 检查是否已经是 Dayjs 对象
-          const isDayjs = config.dateRange[0].$isDayjsObject === true ||
-                         (typeof config.dateRange[0].format === 'function')
-
-          if (!isDayjs) {
-            console.log('[loadStrategy] 转换日期字段:', config.dateRange)
-            config.dateRange = [dayjs(config.dateRange[0]), dayjs(config.dateRange[1])]
-            console.log('[loadStrategy] 转换后的日期:', config.dateRange)
+          console.log('[loadStrategy] 转换日期字段:', config.dateRange)
+          const [savedStartDate, savedEndDate] = config.dateRange
+          const formConfig = {
+            ...config,
+            dateRange: [dayjs(savedStartDate), dayjs(savedEndDate)]
           }
+          console.log('[loadStrategy] 转换后的日期:', formConfig.dateRange)
+          console.log('[loadStrategy] 设置表单值:', formConfig)
+          form.setFieldsValue(formConfig)
+        } else {
+          form.setFieldsValue({
+            ...config,
+            dateRange: [dayjs().subtract(1, 'year'), dayjs()]
+          })
         }
       } else {
         // 如果没有 dateRange，设置默认值
         console.log('[loadStrategy] 策略没有 dateRange，设置默认值')
-        config.dateRange = [dayjs().subtract(1, 'year'), dayjs()]
+        form.setFieldsValue({
+          ...config,
+          dateRange: [dayjs().subtract(1, 'year'), dayjs()]
+        })
       }
-
-      console.log('[loadStrategy] 设置表单值:', config)
-      form.setFieldsValue(config)
 
       console.log('[loadStrategy] 切换到单策略回测页面')
       setActiveTab('single')  // 自动切换到单策略回测页面
@@ -686,10 +711,10 @@ const Backtesting: React.FC = () => {
                           </Divider>
 
                           <Form.Item label="初始资金" name="initial_capital">
-                            <InputNumber
+                            <InputNumber<number>
                               style={{ width: '100%' }}
                               formatter={(value) => `${value}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-                              parser={(value) => value!.replace(/\$\s?|(,*)/g, '')}
+                              parser={(value) => Number((value ?? '').replace(/\$\s?|(,*)/g, '')) || 0}
                               min={0}
                               step={10000}
                             />

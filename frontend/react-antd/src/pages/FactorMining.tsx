@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from "react";
-import { useNavigate } from "react-router-dom";
 import {
   Card,
   Form,
@@ -24,16 +23,19 @@ import {
   BarChartOutlined,
   RocketOutlined,
   SyncOutlined,
-  LoadingOutlined,
-  InfoCircleOutlined,
-  CheckCircleOutlined,
-  WarningOutlined,
-  AimOutlined,
-  BulbOutlined,
   ClockCircleOutlined,
 } from "@ant-design/icons";
-import * as echarts from "echarts";
+import * as echarts from "@/utils/echarts";
 import { api } from "@/services/api";
+import {
+  buildMinedFactorDescription,
+  extractErrorMessage,
+  FACTOR_COPY,
+  formatActionFailure,
+  formatActionSuccess,
+  formatBatchSaveSummary,
+  formatSavedToLibrary,
+} from "@/utils/factorCopy";
 import dayjs from "dayjs";
 import "./FactorMining.css";
 
@@ -83,7 +85,6 @@ interface MiningResult {
 }
 
 const FactorMining: React.FC = () => {
-  const navigate = useNavigate();
   const [form] = Form.useForm();
   const evolutionChartRef = useRef<HTMLDivElement>(null);
   const resultChartRef = useRef<HTMLDivElement>(null);
@@ -99,8 +100,8 @@ const FactorMining: React.FC = () => {
   const [miningResult, setMiningResult] = useState<MiningResult | null>(null);
   const [elapsedTime, setElapsedTime] = useState<number>(0); // 挖掘已用时间（秒）
   const miningStartTimeRef = useRef<number | null>(null); // 挖掘开始时间戳
-  const elapsedTimeIntervalRef = useRef<NodeJS.Timeout | null>(null); // 计时器ID
-  const [savedFactorNames, setSavedFactorNames] = useState<Set<string>>(
+  const elapsedTimeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null); // 计时器ID
+  const [, setSavedFactorNames] = useState<Set<string>>(
     new Set(),
   ); // 已保存的因子名称
 
@@ -208,11 +209,16 @@ const FactorMining: React.FC = () => {
           checkMiningProgress(newTaskId);
         }, 2000);
 
-        message.success("挖掘任务已启动");
+        message.success(formatActionSuccess(FACTOR_COPY.mining.startAction));
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("启动挖掘失败:", error);
-      message.error("启动挖掘失败");
+      message.error(
+        formatActionFailure(
+          FACTOR_COPY.mining.startAction,
+          extractErrorMessage(error),
+        ),
+      );
       setMining(false);
     } finally {
       setLoading(false);
@@ -288,10 +294,15 @@ const FactorMining: React.FC = () => {
           }
           miningStartTimeRef.current = null;
           setMining(false);
-          message.error(`挖掘失败: ${statusData.error || "未知错误"}`);
+          message.error(
+            formatActionFailure(
+              FACTOR_COPY.mining.startAction,
+              statusData.error || "未知错误",
+            ),
+          );
         }
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("获取进度失败:", error);
       // 不中断轮询，继续尝试获取进度
       // 只有在任务不存在时才停止
@@ -333,11 +344,21 @@ const FactorMining: React.FC = () => {
           }, 200);
         }
       } else {
-        message.error("获取结果失败: " + (response.message || "未知错误"));
+        message.error(
+          formatActionFailure(
+            FACTOR_COPY.mining.resultAction,
+            response.message || "未知错误",
+          ),
+        );
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("获取结果失败:", error);
-      message.error("获取结果失败");
+      message.error(
+        formatActionFailure(
+          FACTOR_COPY.mining.resultAction,
+          extractErrorMessage(error),
+        ),
+      );
     }
   };
 
@@ -581,41 +602,17 @@ const FactorMining: React.FC = () => {
     }
 
     try {
-      // 将表达式包装成完整的函数
-      const generateFactorFunction = (expr: string) => {
-        // 为表达式添加 df 前缀
-        const processedExpr = expr
-          .replace(/\bopen\b/g, "df['open']")
-          .replace(/\bclose\b/g, "df['close']")
-          .replace(/\bhigh\b/g, "df['high']")
-          .replace(/\blow\b/g, "df['low']")
-          .replace(/\bvolume\b/g, "df['volume']");
-
-        return `def calculate_factor(df):
-    """
-    遗传算法挖掘因子
-    表达式: ${expr}
-    IC: ${factor.ic?.toFixed(4)}
-    IR: ${factor.ir?.toFixed(4)}
-    """
-    import pandas as pd
-    import numpy as np
-
-    try:
-        result = ${processedExpr}
-        return result
-    except Exception as e:
-        # 如果计算失败，返回全0序列
-        return pd.Series(0, index=df.index)
-`;
-      };
-
       const factorData = {
         name: factorName,
-        code: generateFactorFunction(factor.expression),
+        code: factor.expression.trim(),
         category: "遗传挖掘",
-        description: `通过遗传算法挖掘的因子 | 表达式: ${factor.expression} | IC: ${factor.ic?.toFixed(4)} | IR: ${factor.ir?.toFixed(4)} | 适应度: ${factor.fitness?.toFixed(4)}`,
-        formula_type: "function",
+        description: buildMinedFactorDescription({
+          expression: factor.expression,
+          ic: factor.ic,
+          ir: factor.ir,
+          fitness: factor.fitness,
+        }),
+        formula_type: "auto",
       };
 
       console.log("Saving factor:", factorData);
@@ -624,15 +621,17 @@ const FactorMining: React.FC = () => {
       const response = (await api.createFactor(factorData)) as any;
 
       if (response.success) {
-        message.success(`因子 "${factorName}" 已保存到自定义因子库`);
+        message.success(formatSavedToLibrary(factorName));
         // 记录已保存的因子
         setSavedFactorNames((prev) => new Set(prev).add(factorName));
         // 刷新因子列表
         await loadFactors();
       } else {
         message.error(
-          "保存失败: " +
-            (response.data?.detail || response.message || "未知错误"),
+          formatActionFailure(
+            FACTOR_COPY.mining.saveAction,
+            response.data?.detail || response.message || "未知错误",
+          ),
         );
       }
     } catch (error: any) {
@@ -650,87 +649,11 @@ const FactorMining: React.FC = () => {
         );
         await saveFactor(factor, index, retryCount + 1);
       } else {
-        message.error("保存因子失败: " + errorMsg);
+        message.error(
+          formatActionFailure(FACTOR_COPY.mining.saveAction, errorMsg),
+        );
       }
     }
-  };
-
-  // 保存单个因子到后端（带重试机制）
-  const saveSingleFactorWithRetry = async (
-    factor: MinedFactor,
-    index: number,
-    dateStr: string,
-    stockCode: string,
-  ): Promise<{ success: boolean; name?: string; renamed?: boolean }> => {
-    const baseFactorName = `Mined_Factor_${index + 1}_${dateStr}_${stockCode}`;
-
-    for (let retry = 0; retry <= 5; retry++) {
-      const factorName =
-        retry === 0 ? baseFactorName : `${baseFactorName}_${retry}`;
-
-      try {
-        // 生成完整的因子函数代码
-        const processedExpr = factor.expression
-          .replace(/\bopen\b/g, "df['open']")
-          .replace(/\bclose\b/g, "df['close']")
-          .replace(/\bhigh\b/g, "df['high']")
-          .replace(/\blow\b/g, "df['low']")
-          .replace(/\bvolume\b/g, "df['volume']");
-
-        const factorCode = `def calculate_factor(df):
-    """
-    遗传算法挖掘因子
-    表达式: ${factor.expression}
-    IC: ${factor.ic?.toFixed(4)}
-    IR: ${factor.ir?.toFixed(4)}
-    """
-    import pandas as pd
-    import numpy as np
-
-    try:
-        result = ${processedExpr}
-        return result
-    except Exception as e:
-        return pd.Series(0, index=df.index)
-`;
-
-        const factorData = {
-          name: factorName,
-          code: factorCode,
-          category: "遗传挖掘",
-          description: `通过遗传算法挖掘的因子 | 表达式: ${factor.expression} | IC: ${factor.ic?.toFixed(4)} | IR: ${factor.ir?.toFixed(4)} | 适应度: ${factor.fitness?.toFixed(4)}`,
-          formula_type: "function",
-        };
-
-        const response = (await api.createFactor(factorData)) as any;
-
-        if (response.success) {
-          return {
-            success: true,
-            name: factorName,
-            renamed: retry > 0,
-          };
-        }
-      } catch (error: any) {
-        const errorMsg =
-          error.response?.data?.detail ||
-          error.response?.data?.message ||
-          error.message ||
-          "未知错误";
-
-        // 如果是"已存在"错误且还可以重试，继续循环
-        if (errorMsg.includes("已存在") && retry < 5) {
-          console.log(
-            `因子 ${factorName} 已存在，下一次尝试使用: ${baseFactorName}_${retry + 1}`,
-          );
-          continue;
-        } else {
-          return { success: false };
-        }
-      }
-    }
-
-    return { success: false };
   };
 
   // 保存全部因子
@@ -740,7 +663,7 @@ const FactorMining: React.FC = () => {
       !miningResult.factors ||
       miningResult.factors.length === 0
     ) {
-      message.warning("没有可保存的因子");
+      message.warning("当前没有可保存的候选因子");
       return;
     }
 
@@ -768,51 +691,33 @@ const FactorMining: React.FC = () => {
       const factorName = `Mined_Factor_${i + 1}_${dateStr}_${stockCode}`;
 
       try {
-        // 生成完整的因子函数代码
-        const processedExpr = factor.expression
-          .replace(/\bopen\b/g, "df['open']")
-          .replace(/\bclose\b/g, "df['close']")
-          .replace(/\bhigh\b/g, "df['high']")
-          .replace(/\blow\b/g, "df['low']")
-          .replace(/\bvolume\b/g, "df['volume']");
-
-        const factorCode = `def calculate_factor(df):
-    """
-    遗传算法挖掘因子
-    表达式: ${factor.expression}
-    IC: ${factor.ic?.toFixed(4)}
-    IR: ${factor.ir?.toFixed(4)}
-    """
-    import pandas as pd
-    import numpy as np
-
-    try:
-        result = ${processedExpr}
-        return result
-    except Exception as e:
-        return pd.Series(0, index=df.index)
-`;
-
         const factorData = {
           name: factorName,
-          code: factorCode,
+          code: factor.expression.trim(),
           category: "遗传挖掘",
-          description: `通过遗传算法挖掘的因子 | 表达式: ${factor.expression} | IC: ${factor.ic?.toFixed(4)} | IR: ${factor.ir?.toFixed(4)} | 适应度: ${factor.fitness?.toFixed(4)}`,
-          formula_type: "function",
+          description: buildMinedFactorDescription({
+            expression: factor.expression,
+            ic: factor.ic,
+            ir: factor.ir,
+            fitness: factor.fitness,
+          }),
+          formula_type: "auto",
         };
 
         const response = (await api.createFactor(factorData)) as any;
 
         if (response.success) {
           successCount++;
-          message.success(`因子 "${factorName}" 已保存到自定义因子库`);
+          message.success(formatSavedToLibrary(factorName));
           setSavedFactorNames((prev) => new Set(prev).add(factorName));
           await loadFactors();
         } else {
           failCount++;
           message.error(
-            "保存失败: " +
-              (response.data?.detail || response.message || "未知错误"),
+            formatActionFailure(
+              FACTOR_COPY.mining.saveAction,
+              response.data?.detail || response.message || "未知错误",
+            ),
           );
         }
       } catch (error: any) {
@@ -823,17 +728,17 @@ const FactorMining: React.FC = () => {
           error.response?.data?.message ||
           error.message ||
           "未知错误";
-        message.error(`保存因子失败: ${errorMsg}`);
+        message.error(
+          formatActionFailure(FACTOR_COPY.mining.saveAction, errorMsg),
+        );
       }
     }
 
     // 显示结果消息
     if (failCount === 0) {
-      message.success(`成功保存 ${successCount} 个因子到自定义因子库`);
+      message.success(formatBatchSaveSummary(successCount, failCount));
     } else {
-      message.warning(
-        `保存完成: 成功 ${successCount} 个, 失败 ${failCount} 个`,
-      );
+      message.warning(formatBatchSaveSummary(successCount, failCount));
     }
   };
 
@@ -873,7 +778,7 @@ const FactorMining: React.FC = () => {
             <div>
               <h1 className="page-title">因子挖掘</h1>
               <p className="page-subtitle">
-                使用遗传算法自动发现最优因子表达式
+                {FACTOR_COPY.mining.subtitle}
               </p>
             </div>
           </div>
@@ -942,7 +847,6 @@ const FactorMining: React.FC = () => {
                     optionLabelProp="label"
                     maxTagCount="responsive"
                     size="large"
-                    classNames={{ popup: "factor-select-dropdown" }}
                     listHeight={400}
                   >
                     {factors.map((factor) => (
@@ -1195,10 +1099,10 @@ const FactorMining: React.FC = () => {
                 <div className="placeholder-content">
                   <BarChartOutlined className="placeholder-icon" />
                   <p className="placeholder-text">
-                    配置参数后点击"开始挖掘"按钮
+                    {FACTOR_COPY.mining.emptyStateTitle}
                   </p>
                   <p className="placeholder-hint">
-                    遗传算法将自动搜索最优因子表达式
+                    {FACTOR_COPY.mining.emptyStateHint}
                   </p>
                 </div>
               )}
@@ -1212,7 +1116,7 @@ const FactorMining: React.FC = () => {
                       message={
                         <Space>
                           <SyncOutlined spin />
-                          <span>挖掘进行中...</span>
+                          <span>{FACTOR_COPY.mining.running}</span>
                           <ClockCircleOutlined />
                           <span style={{ color: "#64748b" }}>
                             已用时: {formatElapsedTime(elapsedTime)}
@@ -1289,7 +1193,7 @@ const FactorMining: React.FC = () => {
                       }}
                     >
                       <Spin size="large" />
-                      <p style={{ marginTop: 16 }}>正在执行挖掘任务...</p>
+                      <p style={{ marginTop: 16 }}>{FACTOR_COPY.mining.loading}</p>
                     </div>
                   )}
 
@@ -1312,7 +1216,7 @@ const FactorMining: React.FC = () => {
                 miningStatus.status === "completed" &&
                 !miningResult && (
                   <div style={{ textAlign: "center", padding: "24px" }}>
-                    <Spin size="large" tip="正在加载挖掘结果..." />
+                    <Spin size="large" tip={FACTOR_COPY.mining.loadingResults} />
                   </div>
                 )}
 
@@ -1361,12 +1265,24 @@ const FactorMining: React.FC = () => {
 
                   <Divider />
 
-                  <h3 className="result-title">发现的因子</h3>
+                  <h3 className="result-title">
+                    {FACTOR_COPY.mining.resultSectionTitle}
+                  </h3>
+                  <p
+                    style={{
+                      marginTop: 8,
+                      marginBottom: 16,
+                      color: "#64748b",
+                      fontSize: "13px",
+                    }}
+                  >
+                    {FACTOR_COPY.mining.resultSectionHint}
+                  </p>
 
                   {!miningResult.factors ||
                   miningResult.factors.length === 0 ? (
                     <Alert
-                      message="未发现符合条件的因子"
+                      message={FACTOR_COPY.mining.noResult}
                       type="info"
                       showIcon
                       style={{ marginTop: 16 }}
@@ -1413,7 +1329,7 @@ const FactorMining: React.FC = () => {
                               icon={<SaveOutlined />}
                               onClick={() => saveFactor(factor, index)}
                             >
-                              保存到因子库
+                              {FACTOR_COPY.mining.saveSingle}
                             </Button>
                           </div>
                         </Card>
@@ -1428,7 +1344,7 @@ const FactorMining: React.FC = () => {
                         icon={<SaveOutlined />}
                         onClick={saveAllFactors}
                       >
-                        全部保存到因子库
+                        {FACTOR_COPY.mining.saveAll}
                       </Button>
                     </Space>
                   </div>

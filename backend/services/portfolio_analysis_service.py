@@ -4,6 +4,7 @@
 from typing import Dict, List, Optional
 import pandas as pd
 import numpy as np
+from scipy.optimize import minimize
 
 
 class PortfolioAnalysisService:
@@ -35,19 +36,30 @@ class PortfolioAnalysisService:
         if weight_column not in positions.columns:
             return {"error": f"数据中缺少 {weight_column} 列"}
 
-        # 按行业汇总权重（假设每个股票只出现一次，取第一条记录的权重）
-        industry_weights = positions.groupby(industry_column)[weight_column].first()
+        exposure_frame = positions.copy()
+        if "stock_code" in exposure_frame.columns:
+            group_columns = ["stock_code", industry_column]
+            exposure_frame = (
+                exposure_frame.groupby(group_columns, dropna=False)[weight_column]
+                .sum()
+                .reset_index()
+            )
 
-        # 归一化
-        total_weight = industry_weights.sum()
-        if total_weight > 0:
-            industry_exposure = industry_weights / total_weight
+        industry_net_weights = exposure_frame.groupby(industry_column)[weight_column].sum()
+        industry_gross_weights = exposure_frame.groupby(industry_column)[weight_column].apply(
+            lambda series: series.abs().sum()
+        )
+
+        total_gross_weight = industry_gross_weights.sum()
+        if total_gross_weight > 0:
+            industry_exposure = industry_gross_weights / total_gross_weight
         else:
-            industry_exposure = industry_weights
+            industry_exposure = industry_gross_weights
 
         # 转换为字典
         result = {
             "industry_exposure": industry_exposure.to_dict(),
+            "net_industry_exposure": industry_net_weights.to_dict(),
             "max_exposure": float(industry_exposure.max()),
             "min_exposure": float(industry_exposure.min()),
             "concentration": float(industry_exposure.std()),
@@ -78,25 +90,43 @@ class PortfolioAnalysisService:
         """
         factor_exposures = {}
 
-        # 获取唯一的股票列表和对应的权重（假设每个股票只取第一条记录）
+        # 同一股票可能拆成多条持仓记录，这里统一聚合
         if weight_column in positions.columns:
-            stock_weights = positions.groupby("stock_code")[weight_column].first()
+            stock_weights = positions.groupby("stock_code")[weight_column].sum()
         else:
             return {"error": f"数据中缺少 {weight_column} 列"}
 
         for factor_name, factor_values in factor_data.items():
             try:
-                # 如果因子值是时间序列，取最后一个值（当前值）
-                if isinstance(factor_values, pd.Series):
-                    factor_value = factor_values.iloc[-1]
-                else:
-                    factor_value = factor_values
+                factor_series = None
+                if isinstance(factor_values, pd.DataFrame):
+                    if {"stock_code", "factor_value"}.issubset(factor_values.columns):
+                        factor_series = factor_values.groupby("stock_code")["factor_value"].last()
+                elif isinstance(factor_values, pd.Series):
+                    if isinstance(factor_values.index, pd.MultiIndex) and "stock_code" in factor_values.index.names:
+                        factor_series = factor_values.groupby(level="stock_code").last()
+                    elif factor_values.index.isin(stock_weights.index).any():
+                        factor_series = factor_values
+                    elif len(factor_values) == len(stock_weights):
+                        factor_series = pd.Series(factor_values.values, index=stock_weights.index)
+                elif isinstance(factor_values, dict):
+                    factor_series = pd.Series(factor_values)
 
-                # 加权平均因子值（简化版：假设所有股票的因子值相同）
-                weighted_factor = (stock_weights * factor_value).sum()
+                if factor_series is None:
+                    continue
+
+                aligned = pd.DataFrame({
+                    "weight": stock_weights,
+                    "factor": factor_series,
+                }).dropna()
+
+                if aligned.empty:
+                    continue
+
+                weighted_factor = (aligned["weight"] * aligned["factor"]).sum()
                 factor_exposures[factor_name] = float(weighted_factor)
 
-            except Exception as e:
+            except Exception:
                 # 跳过计算失败的因子
                 continue
 
@@ -123,7 +153,10 @@ class PortfolioAnalysisService:
         if weight_column not in positions.columns:
             return {"error": f"数据中缺少 {weight_column} 列"}
 
-        weights = positions[weight_column].abs().dropna()
+        if "stock_code" in positions.columns:
+            weights = positions.groupby("stock_code")[weight_column].sum().abs().dropna()
+        else:
+            weights = positions[weight_column].abs().dropna()
 
         if len(weights) == 0:
             return {
@@ -162,6 +195,8 @@ class PortfolioAnalysisService:
         sorted_values = np.sort(values)
         n = len(values)
         cumsum = np.cumsum(sorted_values)
+        if n == 0 or cumsum[-1] == 0:
+            return 0.0
         return (n + 1 - 2 * np.sum(cumsum) / cumsum[-1]) / n
 
     def calculate_risk_metrics(
@@ -335,6 +370,12 @@ class PortfolioAnalysisService:
         # 初始化权重
         weights = None
         extra_info = {}
+        initial_weights = np.array([1.0 / n_factors] * n_factors)
+        bounds = [(0.0, 1.0)] * n_factors
+        constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
+        mean_returns = factor_returns.mean()
+        cov_matrix = factor_returns.cov().fillna(0.0)
+        cov_matrix += np.eye(n_factors) * 1e-8
 
         # 1. 等权重
         if method == "equal_weight":
@@ -358,64 +399,105 @@ class PortfolioAnalysisService:
                         "ir": ir
                     }
 
-            # 基于IR加权（IR为负的设为0）
             ir_values = pd.Series({
-                factor: max(0, stats["ir"])
+                factor: stats["ir"]
                 for factor, stats in factor_stats.items()
             })
 
-            if ir_values.sum() == 0:
-                # 如果所有IR都<=0，回退到等权重
-                weights = pd.Series(1.0 / n_factors, index=factor_returns.columns)
-            else:
-                weights = ir_values / ir_values.sum()
+            weights = self._scores_to_long_only_weights(ir_values)
 
             extra_info["factor_stats"] = factor_stats
 
+        elif method == "ir_weight":
+            ir_values = {}
+            for factor in factor_returns.columns:
+                series = factor_returns[factor].dropna()
+                if len(series) == 0:
+                    ir_values[factor] = 0.0
+                    continue
+
+                mean_return = series.mean()
+                std_return = series.std()
+                ir_values[factor] = mean_return / std_return if std_return > 0 else 0.0
+
+            ir_series = pd.Series(ir_values)
+            weights = self._scores_to_long_only_weights(ir_series)
+            extra_info["factor_ir"] = ir_values
+
         # 3. 风险平价
         elif method == "risk_parity":
-            # 计算每个因子的波动率
-            volatilities = factor_returns.std()
+            def risk_parity_objective(w):
+                portfolio_vol = np.sqrt(w.T @ cov_matrix.values @ w)
+                if portfolio_vol == 0:
+                    return 1e6
+                marginal = cov_matrix.values @ w
+                risk_contrib = w * marginal / portfolio_vol
+                target = np.full_like(risk_contrib, portfolio_vol / len(risk_contrib))
+                return np.sum((risk_contrib - target) ** 2)
 
-            # 风险平价权重与波动率成反比
-            inv_vol = 1.0 / volatilities
-            weights = inv_vol / inv_vol.sum()
+            optimization = minimize(
+                risk_parity_objective,
+                initial_weights,
+                method="SLSQP",
+                bounds=bounds,
+                constraints=constraints,
+            )
+            if not optimization.success:
+                return {"weights": {}, "method": method, "error": optimization.message}
+            weights = pd.Series(optimization.x, index=factor_returns.columns)
 
-        # 4. 最大夏普比率（简化版：基于历史数据）
+        # 4. 最大夏普比率
         elif method == "max_sharpe":
-            # 简化方法：使用历史收益率和波动率
-            mean_returns = factor_returns.mean()
-            std_returns = factor_returns.std()
+            daily_rf = risk_free_rate / 252
 
-            # 计算夏普比率（假设日频，年化）
-            sharpe_ratios = mean_returns / std_returns * np.sqrt(252)
+            def negative_sharpe(w):
+                portfolio_return = float(np.dot(w, mean_returns.values))
+                portfolio_vol = float(np.sqrt(w.T @ cov_matrix.values @ w))
+                if portfolio_vol == 0:
+                    return 1e6
+                return -((portfolio_return - daily_rf) / portfolio_vol)
 
-            # 只投资夏普比率为正的因子
-            positive_sharpe = sharpe_ratios[sharpe_ratios > 0]
-
-            if len(positive_sharpe) == 0:
-                # 如果没有正夏普因子，回退到等权重
-                weights = pd.Series(1.0 / n_factors, index=factor_returns.columns)
-            else:
-                # 按夏普比率加权
-                sharpe_weights = positive_sharpe / positive_sharpe.sum()
-                weights = pd.Series(0.0, index=factor_returns.columns)
-                weights.update(sharpe_weights)
-
-            extra_info["sharpe_ratios"] = sharpe_ratios.to_dict()
+            optimization = minimize(
+                negative_sharpe,
+                initial_weights,
+                method="SLSQP",
+                bounds=bounds,
+                constraints=constraints,
+            )
+            if not optimization.success:
+                return {"weights": {}, "method": method, "error": optimization.message}
+            weights = pd.Series(optimization.x, index=factor_returns.columns)
 
         # 5. 最小方差
         elif method == "min_variance":
-            # 计算协方差矩阵
-            cov_matrix = factor_returns.cov()
+            def portfolio_variance_objective(w):
+                return float(w.T @ cov_matrix.values @ w)
 
-            # 简化的最小方差：根据因子的方差（对角线）加权
-            # 方差越小，权重越大
-            variances = pd.Series(np.diag(cov_matrix), index=cov_matrix.index)
-            inv_var = 1.0 / (variances + 1e-8)  # 添加小值避免除零
-            weights = inv_var / inv_var.sum()
+            optimization = minimize(
+                portfolio_variance_objective,
+                initial_weights,
+                method="SLSQP",
+                bounds=bounds,
+                constraints=constraints,
+            )
+            if not optimization.success:
+                return {"weights": {}, "method": method, "error": optimization.message}
+            weights = pd.Series(optimization.x, index=factor_returns.columns)
 
-            extra_info["note"] = "基于方差倒数的简化最小方差"
+        elif method == "max_return":
+            def negative_return(w):
+                return -float(np.dot(w, mean_returns.values))
+
+            optimization = minimize(
+                negative_return,
+                initial_weights,
+                method="SLSQP",
+                bounds=bounds,
+                constraints=constraints,
+            )
+            if not optimization.success:
+                return {"weights": {}, "method": method, "error": optimization.message}
+            weights = pd.Series(optimization.x, index=factor_returns.columns)
 
         else:
             return {
@@ -427,13 +509,12 @@ class PortfolioAnalysisService:
         # ========== 统一计算基于权重的组合指标 ==========
 
         # 计算加权期望收益（年化）
-        mean_returns = factor_returns.mean()  # 每个因子的平均收益
         weighted_return = (weights * mean_returns).sum() * 252  # 年化
 
         # 计算加权波动率（年化）
         # 组合方差 = w' * Σ * w
-        cov_matrix = factor_returns.cov() * 252  # 年化协方差矩阵
-        portfolio_variance = np.dot(weights.T, np.dot(cov_matrix.values, weights))
+        annualized_cov = cov_matrix * 252
+        portfolio_variance = np.dot(weights.T, np.dot(annualized_cov.values, weights))
         weighted_volatility = np.sqrt(portfolio_variance)
 
         # 计算夏普比率
@@ -544,14 +625,30 @@ class PortfolioAnalysisService:
                 results[method] = {
                     "annual_return": optimization_result["expected_return"],
                     "volatility": optimization_result["expected_volatility"],
-                    "sharpe_ratio": (
-                        optimization_result["expected_return"] / optimization_result["expected_volatility"]
-                        if optimization_result["expected_volatility"] > 0
-                        else 0
-                    ),
+                    "sharpe_ratio": optimization_result["sharpe_ratio"],
                 }
 
         return results
+
+    def _scores_to_long_only_weights(self, scores: pd.Series) -> pd.Series:
+        """
+        将任意实数评分转换为可解释的长仓权重。
+
+        当所有评分都为负时，不再静默退化为等权，而是保持相对优劣顺序。
+        """
+        clean_scores = scores.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        if clean_scores.empty:
+            return pd.Series(dtype=float)
+
+        if clean_scores.nunique() == 1:
+            return pd.Series(1.0 / len(clean_scores), index=clean_scores.index)
+
+        shifted_scores = clean_scores - clean_scores.min()
+        shifted_scores = shifted_scores + 1e-8
+        total_score = shifted_scores.sum()
+        if total_score <= 0:
+            return pd.Series(1.0 / len(clean_scores), index=clean_scores.index)
+        return shifted_scores / total_score
 
     def _get_method_display_name(self, method: str) -> str:
         """获取方法的显示名称"""

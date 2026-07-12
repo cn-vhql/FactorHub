@@ -1,7 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react'
-import * as echarts from 'echarts'
+import * as echarts from '@/utils/echarts'
 import { Tabs, Spin, Empty, Radio, Space } from 'antd'
-import { LineChartOutlined } from '@ant-design/icons'
 
 interface ChartData {
   dates: string[]
@@ -36,10 +35,12 @@ interface SignalTypeData {
   }
 }
 
-interface SignalData {
-  strategy: SignalTypeData  // 策略信号（所有满足条件的信号）
-  actual: SignalTypeData    // 实际交易信号（VectorBT执行的交易）
-}
+type SignalData =
+  | {
+      strategy: SignalTypeData  // 策略信号（所有满足条件的信号）
+      actual: SignalTypeData    // 实际交易信号（VectorBT执行的交易）
+    }
+  | SignalTypeData
 
 interface EquityData {
   dates: string[]
@@ -59,6 +60,12 @@ interface BacktestChartsProps {
 }
 
 type SignalDisplayType = 'actual' | 'strategy'
+
+const isSignalBucketData = (
+  signals: SignalData
+): signals is { strategy: SignalTypeData; actual: SignalTypeData } => {
+  return 'strategy' in signals && 'actual' in signals
+}
 
 const BacktestCharts: React.FC<BacktestChartsProps> = ({ data, loading = false }) => {
   const chartRef = useRef<HTMLDivElement>(null)
@@ -102,13 +109,14 @@ const BacktestCharts: React.FC<BacktestChartsProps> = ({ data, loading = false }
     const { kline, factor, signals, equity } = chartData
 
     // 向后兼容：处理旧数据格式（只有单一信号类型）
-    let normalizedSignals = signals
-    if (!signals.strategy && !signals.actual) {
+    const normalizedSignals = isSignalBucketData(signals)
+      ? signals
+      : {
+          strategy: signals,
+          actual: signals
+        }
+    if (!isSignalBucketData(signals)) {
       // 旧格式：signals直接包含buy/sell
-      normalizedSignals = {
-        strategy: signals as SignalTypeData,
-        actual: signals as SignalTypeData
-      }
     }
 
     // 处理因子数据：支持新旧两种格式
@@ -458,7 +466,7 @@ const BacktestCharts: React.FC<BacktestChartsProps> = ({ data, loading = false }
         {
           name: '日K线',
           type: 'candlestick',
-          data: kline.dates.map((date, i) => [
+          data: kline.dates.map((_, i) => [
             kline.open[i],
             kline.close[i],
             kline.low[i],

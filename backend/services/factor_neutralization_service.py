@@ -6,14 +6,12 @@ import numpy as np
 from typing import Dict, List, Optional
 from sklearn.linear_model import LinearRegression
 
-from backend.services.data_service import data_service
-
 
 class FactorNeutralizationService:
     """因子中性化服务类"""
 
     def __init__(self):
-        pass
+        self._industry_cache: Dict[str, str] = {}
 
     def neutralize_market_cap(
         self,
@@ -146,7 +144,7 @@ class FactorNeutralizationService:
 
     def get_industry_classification(self, stock_codes: List[str]) -> Dict[str, str]:
         """
-        获取股票的行业分类（简化版，使用申万一级分类）
+        获取股票的真实行业分类
 
         Args:
             stock_codes: 股票代码列表
@@ -154,27 +152,39 @@ class FactorNeutralizationService:
         Returns:
             股票代码到行业的映射字典
         """
-        # 这里使用简化的行业分类
-        # 实际应用中应该从数据源获取准确的分类
+        normalized_pairs = [
+            (code, self._normalize_stock_code(code))
+            for code in stock_codes
+        ]
+        pending_codes = {
+            normalized
+            for _, normalized in normalized_pairs
+            if normalized not in self._industry_cache
+        }
 
-        # 简化版行业分类（按股票代码前缀）
-        industry_map = {}
-        for code in stock_codes:
-            if code.startswith("6"):
-                # 上海主板
-                industry_map[code] = "main_board_sh"
-            elif code.startswith("0") or code.startswith("3"):
-                # 深圳主板/创业板
-                industry_map[code] = "main_board_sz"
-            else:
-                industry_map[code] = "other"
+        if pending_codes:
+            self._hydrate_industry_cache(pending_codes)
 
-        return industry_map
+        missing_codes = sorted(
+            normalized
+            for _, normalized in normalized_pairs
+            if normalized not in self._industry_cache
+        )
+        if missing_codes:
+            missing_display = ", ".join(missing_codes[:10])
+            raise ValueError(
+                f"无法从真实数据源获取行业分类: {missing_display}"
+            )
+
+        return {
+            original_code: self._industry_cache[normalized_code]
+            for original_code, normalized_code in normalized_pairs
+        }
 
     def add_industry_classification(
         self,
         df: pd.DataFrame,
-        stock_codes: List[str]
+        stock_codes: Optional[List[str]] = None
     ) -> pd.DataFrame:
         """
         为数据框添加行业分类列
@@ -186,21 +196,180 @@ class FactorNeutralizationService:
         Returns:
             添加了industry列的数据框
         """
-        industry_map = self.get_industry_classification(stock_codes)
-
-        # 从索引中提取股票代码（假设索引包含股票代码信息）
-        # 这里简化处理，直接使用映射
         result = df.copy()
-
-        # 如果df有stock_code列
         if "stock_code" in df.columns:
-            result["industry"] = result["stock_code"].map(industry_map)
+            codes = result["stock_code"].astype(str).tolist()
+            industry_map = self.get_industry_classification(codes)
+            result["industry"] = result["stock_code"].astype(str).map(industry_map)
+        elif isinstance(df.index, pd.MultiIndex) and "stock_code" in df.index.names:
+            codes = df.index.get_level_values("stock_code").astype(str).tolist()
+            industry_map = self.get_industry_classification(codes)
+            result["industry"] = df.index.get_level_values("stock_code").astype(str).map(industry_map)
+        elif stock_codes and len({self._normalize_stock_code(code) for code in stock_codes}) == 1:
+            industry_map = self.get_industry_classification(stock_codes)
+            result["industry"] = industry_map[stock_codes[0]]
         else:
-            # 如果没有stock_code列，尝试从索引中提取
-            # 简化处理：直接添加一列
-            result["industry"] = "unknown"
+            raise ValueError("缺少股票代码信息，无法添加真实行业分类")
+
+        if result["industry"].isna().any():
+            missing_codes = result.loc[result["industry"].isna(), "stock_code"].astype(str).unique().tolist() if "stock_code" in result.columns else []
+            raise ValueError(f"以下股票缺少行业分类: {missing_codes}")
 
         return result
+
+    def _normalize_stock_code(self, code: str) -> str:
+        """标准化股票代码为 6 位数字格式。"""
+        code = str(code).strip().upper()
+        if "." in code:
+            code = code.split(".")[0]
+        return code.zfill(6) if code.isdigit() else code
+
+    def _hydrate_industry_cache(self, pending_codes: set[str]) -> None:
+        """使用真实数据源批量或逐只补齐行业映射缓存。"""
+        for code in pending_codes:
+            industry = self._load_industry_from_cninfo(code)
+            if industry:
+                self._industry_cache[code] = industry
+
+        unresolved = [code for code in pending_codes if code not in self._industry_cache]
+        if unresolved:
+            self._load_industry_map_from_spot(set(unresolved))
+
+        unresolved = [code for code in pending_codes if code not in self._industry_cache]
+        for code in unresolved:
+            industry = self._load_industry_from_individual_info(code)
+            if industry:
+                self._industry_cache[code] = industry
+
+    def _load_industry_from_cninfo(self, stock_code: str) -> Optional[str]:
+        """从巨潮行业变更接口获取最新有效行业分类。"""
+        try:
+            import akshare as ak
+        except ImportError as exc:
+            raise ValueError("AkShare 未安装，无法获取真实行业分类") from exc
+
+        try:
+            info_df = ak.stock_industry_change_cninfo(
+                symbol=stock_code,
+                start_date="20000101",
+                end_date=pd.Timestamp.today().strftime("%Y%m%d"),
+            )
+        except Exception:
+            return None
+
+        if info_df is None or info_df.empty:
+            return None
+
+        info_df = info_df.copy()
+        if "变更日期" in info_df.columns:
+            info_df["变更日期"] = pd.to_datetime(info_df["变更日期"], errors="coerce")
+
+        preferred_standards = [
+            "巨潮行业分类标准",
+            "申银万国行业分类标准",
+            "中证行业分类标准",
+            "中国上市公司协会上市公司行业分类标准",
+        ]
+
+        for standard in preferred_standards:
+            if "分类标准" not in info_df.columns:
+                break
+            filtered = info_df[info_df["分类标准"].astype(str).str.contains(standard, na=False)]
+            industry = self._extract_latest_industry_name(filtered)
+            if industry:
+                return industry
+
+        return self._extract_latest_industry_name(info_df)
+
+    def _extract_latest_industry_name(self, df: pd.DataFrame) -> Optional[str]:
+        """从行业变更记录中提取最新有效行业名称。"""
+        if df is None or df.empty:
+            return None
+
+        sorted_df = df.sort_values("变更日期", ascending=False) if "变更日期" in df.columns else df
+        for _, row in sorted_df.iterrows():
+            for column in ["行业大类", "行业中类", "行业次类", "行业门类"]:
+                value = row.get(column)
+                if pd.notna(value) and str(value).strip():
+                    return str(value).strip()
+        return None
+
+    def _load_industry_map_from_spot(self, pending_codes: set[str]) -> None:
+        """从全市场实时行情中提取行业字段。"""
+        try:
+            import akshare as ak
+        except ImportError as exc:
+            raise ValueError("AkShare 未安装，无法获取真实行业分类") from exc
+
+        try:
+            spot_df = ak.stock_zh_a_spot_em()
+        except Exception:
+            return
+
+        if spot_df is None or spot_df.empty:
+            return
+
+        code_column = self._find_first_existing_column(
+            spot_df,
+            ["代码", "股票代码", "证券代码", "symbol", "Symbol"],
+        )
+        industry_column = self._find_first_existing_column(
+            spot_df,
+            ["行业", "所属行业", "所处行业", "industry", "Industry"],
+        )
+
+        if code_column is None or industry_column is None:
+            return
+
+        mapped = spot_df[[code_column, industry_column]].dropna()
+        mapped[code_column] = mapped[code_column].astype(str).map(self._normalize_stock_code)
+        mapped[industry_column] = mapped[industry_column].astype(str).str.strip()
+
+        valid_rows = mapped[
+            mapped[code_column].isin(pending_codes) &
+            mapped[industry_column].ne("")
+        ]
+
+        for _, row in valid_rows.iterrows():
+            self._industry_cache[row[code_column]] = row[industry_column]
+
+    def _load_industry_from_individual_info(self, stock_code: str) -> Optional[str]:
+        """从个股资料接口补齐行业字段。"""
+        try:
+            import akshare as ak
+        except ImportError as exc:
+            raise ValueError("AkShare 未安装，无法获取真实行业分类") from exc
+
+        try:
+            info_df = ak.stock_individual_info_em(symbol=stock_code)
+        except Exception:
+            return None
+
+        if info_df is None or info_df.empty:
+            return None
+
+        item_column = self._find_first_existing_column(info_df, ["item", "项目", "Item"])
+        value_column = self._find_first_existing_column(info_df, ["value", "值", "Value"])
+        if item_column is None or value_column is None:
+            return None
+
+        info_df[item_column] = info_df[item_column].astype(str).str.strip()
+        mask = info_df[item_column].str.contains("行业", na=False)
+        if not mask.any():
+            return None
+
+        industry_value = info_df.loc[mask, value_column].dropna().astype(str).str.strip()
+        if industry_value.empty:
+            return None
+
+        return industry_value.iloc[0]
+
+    def _find_first_existing_column(self, df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+        """返回候选列名中第一个存在的列。"""
+        for column in candidates:
+            if column in df.columns:
+                return column
+        return None
 
 
 # 全局因子中性化服务实例

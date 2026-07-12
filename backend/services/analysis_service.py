@@ -118,11 +118,43 @@ class AnalysisService:
 
         return result
 
+    def _get_factor_cache_signature(self, factor_names: List[str]) -> str:
+        """生成因子定义签名，避免同名因子改版后复用旧缓存。"""
+        db = get_db_session()
+        try:
+            from backend.repositories.factor_repository import FactorRepository
+
+            repo = FactorRepository(db)
+            signature_parts = []
+            for factor_name in sorted(factor_names):
+                factor = repo.get_by_name(factor_name)
+                if factor is None:
+                    signature_parts.append(f"{factor_name}:missing")
+                    continue
+
+                code_hash = hashlib.md5(factor.code.encode("utf-8")).hexdigest()[:12]
+                updated_at = factor.updated_at.isoformat() if factor.updated_at else "unknown"
+                signature_parts.append(f"{factor.name}:{code_hash}:{updated_at}")
+
+            return "|".join(signature_parts)
+        finally:
+            db.close()
+
     def _generate_cache_key(
-        self, stock_codes: List[str], factor_names: List[str], start_date: str, end_date: str
+        self,
+        stock_codes: List[str],
+        factor_names: List[str],
+        start_date: str,
+        end_date: str,
+        rolling_window: int,
+        factor_signature: str,
     ) -> str:
         """生成缓存键"""
-        key_str = f"{','.join(sorted(stock_codes))}_{','.join(sorted(factor_names))}_{start_date}_{end_date}"
+        key_str = (
+            f"{','.join(sorted(stock_codes))}_"
+            f"{','.join(sorted(factor_names))}_"
+            f"{start_date}_{end_date}_{rolling_window}_{factor_signature}"
+        )
         return hashlib.md5(key_str.encode()).hexdigest()[:32]
 
     def analyze(
@@ -148,7 +180,15 @@ class AnalysisService:
         Returns:
             包含所有分析结果的字典
         """
-        cache_key = self._generate_cache_key(stock_codes, factor_names, start_date, end_date)
+        factor_signature = self._get_factor_cache_signature(factor_names)
+        cache_key = self._generate_cache_key(
+            stock_codes,
+            factor_names,
+            start_date,
+            end_date,
+            rolling_window,
+            factor_signature,
+        )
 
         # 计算因子数据（始终需要，因为缓存不包含原始数据）
         factor_data = factor_service.calculate_factors_for_stocks(
@@ -199,15 +239,24 @@ class AnalysisService:
             repo = AnalysisCacheRepository(db)
             # 序列化结果（移除 factor_data）
             serialized_results = self._serialize_for_cache(results)
-            cache = AnalysisCacheModel(
-                cache_key=cache_key,
-                stock_codes=",".join(stock_codes),
-                factor_names=",".join(factor_names),
-                start_date=start_date,
-                end_date=end_date,
-                result_data=serialized_results,
-            )
-            repo.create(cache)
+            existing_cache = repo.get_by_key(cache_key)
+            if existing_cache:
+                existing_cache.stock_codes = ",".join(stock_codes)
+                existing_cache.factor_names = ",".join(factor_names)
+                existing_cache.start_date = start_date
+                existing_cache.end_date = end_date
+                existing_cache.result_data = serialized_results
+                repo.update(existing_cache)
+            else:
+                cache = AnalysisCacheModel(
+                    cache_key=cache_key,
+                    stock_codes=",".join(stock_codes),
+                    factor_names=",".join(factor_names),
+                    start_date=start_date,
+                    end_date=end_date,
+                    result_data=serialized_results,
+                )
+                repo.create(cache)
             db.close()
 
         return results

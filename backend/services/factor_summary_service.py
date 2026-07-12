@@ -128,19 +128,17 @@ class FactorSummaryService:
         """
         score = 0.0
 
-        # IC均值得分（0-40分）
         ic_summary = summary.get("ic_summary", {})
-        if ic_summary and not isinstance(ic_summary, dict) or ic_summary:
-            # 简化处理：假设第一个因子的IC数据
-            first_factor = list(ic_summary.values())[0] if ic_summary else {}
-            ic_mean = abs(first_factor.get("ic_mean", 0))
-            score += min(ic_mean * 400, 40)  # IC=0.1时得40分满分
+        factor_metrics = [value for value in ic_summary.values() if isinstance(value, dict)]
+        if factor_metrics:
+            avg_ic_mean = float(np.mean([abs(item.get("ic_mean", 0.0)) for item in factor_metrics]))
+            avg_ir = float(np.mean([item.get("ir", 0.0) for item in factor_metrics]))
+            avg_positive_ratio = float(np.mean([item.get("ic_positive_ratio", 0.0) for item in factor_metrics]))
 
-        # IR得分（0-30分）
-        if ic_summary:
-            first_factor = list(ic_summary.values())[0] if ic_summary else {}
-            ir = first_factor.get("ir", 0)
-            score += min(ir * 10, 30)  # IR=3时得30分满分
+            score += min(avg_ic_mean * 400, 40)
+            score += min(avg_ir * 10, 30)
+        else:
+            avg_positive_ratio = 0.0
 
         # 稳定性得分（0-20分）
         stability_summary = summary.get("stability_summary")
@@ -149,10 +147,7 @@ class FactorSummaryService:
             score += stability_score * 20
 
         # IC>0占比得分（0-10分）
-        if ic_summary:
-            first_factor = list(ic_summary.values())[0] if ic_summary else {}
-            positive_ratio = first_factor.get("ic_positive_ratio", 0)
-            score += positive_ratio * 10
+        score += avg_positive_ratio * 10
 
         return round(score, 2)
 

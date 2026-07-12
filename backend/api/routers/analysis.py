@@ -2,8 +2,9 @@
 因子分析API路由
 """
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 import pandas as pd
 import numpy as np
 import sys
@@ -19,6 +20,26 @@ def safe_numeric_value(value):
     return float(value)
 
 
+def serialize_series(series: pd.Series) -> Dict[str, List[float | str]]:
+    """将序列转换为前端可消费的日期和值数组。"""
+    valid_series = series.dropna()
+    dates = valid_series.index.strftime('%Y-%m-%d').tolist()
+    raw_values = [safe_numeric_value(v) for v in valid_series.tolist()]
+
+    filtered_dates: List[str] = []
+    filtered_values: List[float] = []
+    for current_date, value in zip(dates, raw_values):
+        if value is None:
+            continue
+        filtered_dates.append(current_date)
+        filtered_values.append(value)
+
+    return {
+        "dates": filtered_dates,
+        "values": filtered_values,
+    }
+
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from backend.services.analysis_service import analysis_service
@@ -28,6 +49,7 @@ from backend.services.factor_exposure_service import factor_exposure_service
 from backend.services.factor_effectiveness_service import factor_effectiveness_service
 from backend.services.factor_attribution_service import factor_attribution_service
 from backend.services.factor_monitoring_service import factor_monitoring_service
+from backend.services.ai_analysis_service import ai_factor_analysis_service
 
 router = APIRouter()
 
@@ -64,6 +86,17 @@ class MultiPeriodRequest(BaseModel):
     stock_codes: List[str]
     start_date: str
     end_date: str
+
+
+class AIFactorInterpretRequest(BaseModel):
+    """AI 因子解读请求。"""
+
+    factor: Dict[str, Any]
+    stock_code: str
+    start_date: str
+    end_date: str
+    chart_period: Optional[str] = None
+    analysis_context: Dict[str, Any]
 
 
 # ========== API端点 ==========
@@ -114,7 +147,12 @@ async def calculate_factor(request: CalculateRequest):
 
                 # 使用 calculator 计算因子
                 logger.info(f"开始计算因子值，因子代码: {factor.code}")
-                factor_series = factor_service.calculator.calculate(data, factor.code)
+                factor_result = factor_service.calculator.calculate_with_metadata(
+                    data,
+                    factor.code,
+                    getattr(factor, "formula_type", None),
+                )
+                factor_series = factor_result.primary
 
                 if factor_series is None:
                     logger.warning(f"股票 {stock_code} 因子计算返回 None")
@@ -123,27 +161,9 @@ async def calculate_factor(request: CalculateRequest):
 
                 logger.info(f"因子计算完成，有效值数量: {factor_series.notna().sum()}/{len(factor_series)}")
 
-                # 将因子值添加到数据中
-                data[request.factor_name] = factor_series
-
-                # 过滤掉因子值为 NaN 的行，确保 dates 和 factor_values 一一对应
-                valid_data = data[[request.factor_name]].dropna()
-                valid_dates = valid_data.index.strftime('%Y-%m-%d').tolist()
-                valid_factor_values = valid_data[request.factor_name].tolist()
-
-                # 额外检查：确保所有值都是有效的数字，转换 NaN 和 inf 为 None
-                valid_factor_values = [safe_numeric_value(v) for v in valid_factor_values]
-
-                # 移除值为 None 的项
-                filtered_dates = []
-                filtered_values = []
-                for d, v in zip(valid_dates, valid_factor_values):
-                    if v is not None:
-                        filtered_dates.append(d)
-                        filtered_values.append(v)
-
-                valid_dates = filtered_dates
-                valid_factor_values = filtered_values
+                primary_payload = serialize_series(factor_series)
+                valid_dates = primary_payload["dates"]
+                valid_factor_values = primary_payload["values"]
 
                 logger.info(f"股票 {stock_code}: 有效数据范围 {valid_dates[0] if valid_dates else '无'} 到 {valid_dates[-1] if valid_dates else '无'}, 共 {len(valid_dates)} 行")
 
@@ -157,6 +177,15 @@ async def calculate_factor(request: CalculateRequest):
                 result_data[stock_code] = {
                     "dates": valid_dates,
                     "factor_values": valid_factor_values,
+                    "plot_series": [
+                        {
+                            "name": plot.name,
+                            "render_type": plot.render_type,
+                            **serialize_series(plot.values),
+                        }
+                        for plot in factor_result.plots
+                    ],
+                    "formula_type": factor_result.formula_type,
                     "statistics": {
                         "mean": safe_numeric_value(factor_series.mean()) if len(factor_series) > 0 else None,
                         "std": safe_numeric_value(factor_series.std()) if len(factor_series) > 0 else None,
@@ -214,7 +243,7 @@ async def calculate_ic(request: ICAnalysisRequest):
 
         logger.info(f"IC分析原始结果: {result}")
 
-        # 提取 IC/IR 相关数据并简化返回格式
+        # 提取 IC/IR 相关数据并整理为接口返回格式
         ic_ir_data = result.get("ic_ir", {})
         ic_stats = ic_ir_data.get("ic_stats", {})
 
@@ -334,7 +363,11 @@ async def decay_analysis(request: ICAnalysisRequest):
                 )
                 if data is not None and len(data) > 0:
                     # 计算因子
-                    factor_series = factor_service.calculator.calculate(data, factor.code)
+                    factor_series = factor_service.calculator.calculate(
+                        data,
+                        factor.code,
+                        getattr(factor, "formula_type", None),
+                    )
                     if factor_series is not None:
                         # 计算未来收益率
                         future_returns = data["close"].pct_change(period).shift(-period)
@@ -573,3 +606,23 @@ async def monitoring_analysis(request: ICAnalysisRequest):
     except Exception as e:
         logger.error(f"时间序列动态监测失败: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"时间序列动态监测失败: {str(e)}")
+
+
+@router.post("/ai-interpret/stream")
+async def stream_ai_factor_interpretation(request: AIFactorInterpretRequest):
+    """流式生成 AI 因子分析报告。"""
+    try:
+        generator = ai_factor_analysis_service.stream_analysis_report(request.model_dump())
+        return StreamingResponse(
+            generator,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))

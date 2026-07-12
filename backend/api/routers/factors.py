@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 from backend.services.factor_service import factor_service
 from backend.services.factor_generator_service import factor_generator_service
+from backend.formula_engine.runtime import normalize_formula_type
 
 router = APIRouter()
 
@@ -23,7 +24,7 @@ class FactorCreate(BaseModel):
     code: str
     category: str
     description: str = ""
-    formula_type: str = "expression"  # expression 或 function
+    formula_type: str = "auto"  # auto / mylanguage / python
 
 
 class FactorUpdate(BaseModel):
@@ -32,6 +33,7 @@ class FactorUpdate(BaseModel):
     code: Optional[str] = None
     category: Optional[str] = None
     description: Optional[str] = None
+    formula_type: Optional[str] = None
 
 
 class BatchGenerateRequest(BaseModel):
@@ -135,6 +137,8 @@ async def create_factor(request: FactorCreate):
             "data": factor,
             "message": "因子创建成功"
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -149,13 +153,16 @@ async def update_factor(factor_id: int, request: FactorUpdate):
             name=request.name,
             code=request.code,
             category=request.category,
-            description=request.description
+            description=request.description,
+            formula_type=request.formula_type,
         )
 
         return {
             "success": True,
             "message": "因子更新成功"
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -250,31 +257,161 @@ async def batch_generate_factors(request: BatchGenerateRequest):
 async def preselect_factors(request: PreselectRequest):
     """预筛选因子"""
     try:
-        # 这里需要实现预筛选逻辑
-        # 暂时返回示例数据
+        if not request.factors:
+            return {
+                "success": True,
+                "data": {
+                    "total": 0,
+                    "selected": 0,
+                    "factors": [],
+                    "details": []
+                }
+            }
+
+        from backend.core.settings import settings
+        from backend.core.database import get_db_session
+        from backend.repositories.factor_repository import FactorRepository
+        from backend.services.data_service import data_service
+        from backend.services.factor_validation_service import FactorValidationService
+        import pandas as pd
+        import numpy as np
+
+        sample_stock_codes = [
+            "000001.SZ",
+            "000002.SZ",
+            "600000.SH",
+            "600036.SH",
+            "600519.SH",
+        ]
+        stock_data_map = data_service.get_multiple_stocks_data(
+            stock_codes=sample_stock_codes,
+            start_date=settings.DEFAULT_START_DATE,
+            end_date=settings.DEFAULT_END_DATE,
+            use_cache=True,
+        )
+
+        if not stock_data_map:
+            raise HTTPException(status_code=503, detail="预筛选失败：无法获取样本股票数据")
+
+        validator = FactorValidationService(
+            ic_threshold=request.ic_threshold,
+            ir_threshold=request.ir_threshold,
+        )
+
+        db = get_db_session()
+        repo = FactorRepository(db)
+        try:
+            selected_factors = []
+            details = []
+
+            for factor_identifier in request.factors:
+                try:
+                    factor_record = repo.get_by_name(factor_identifier)
+                    factor_code = factor_record.code if factor_record else factor_identifier
+                    factor_formula_type = getattr(factor_record, "formula_type", None)
+
+                    ic_values = []
+                    ir_values = []
+                    valid_ratios = []
+
+                    for stock_code, stock_df in stock_data_map.items():
+                        if stock_df is None or len(stock_df) == 0:
+                            continue
+
+                        factor_values = factor_service.calculator.calculate(
+                            stock_df.copy(),
+                            factor_code,
+                            factor_formula_type,
+                        )
+                        future_returns = stock_df["close"].pct_change().shift(-1)
+
+                        aligned = pd.DataFrame({
+                            "factor": factor_values,
+                            "return": future_returns,
+                        }).replace([np.inf, -np.inf], np.nan).dropna()
+
+                        valid_ratio = len(aligned) / len(stock_df) if len(stock_df) > 0 else 0.0
+                        valid_ratios.append(valid_ratio)
+
+                        if aligned.empty:
+                            continue
+
+                        validation = validator.validate_factor(
+                            factor_values=aligned["factor"],
+                            return_values=aligned["return"],
+                        )
+
+                        ic_values.append(abs(validation["ic_validation"]["ic"]))
+                        ir_values.append(validation["ir_validation"]["ir"])
+
+                    avg_ic = float(np.mean(ic_values)) if ic_values else 0.0
+                    avg_ir = float(np.mean(ir_values)) if ir_values else 0.0
+                    avg_valid_ratio = float(np.mean(valid_ratios)) if valid_ratios else 0.0
+                    passed = (
+                        avg_ic >= request.ic_threshold and
+                        avg_ir >= request.ir_threshold and
+                        avg_valid_ratio >= request.min_valid_ratio
+                    )
+
+                    detail = {
+                        "factor": factor_identifier,
+                        "code": factor_code,
+                        "avg_ic": avg_ic,
+                        "avg_ir": avg_ir,
+                        "avg_valid_ratio": avg_valid_ratio,
+                        "passed": passed,
+                        "sample_size": len(valid_ratios),
+                    }
+
+                    if passed:
+                        selected_factors.append(factor_identifier)
+                except Exception as factor_error:
+                    detail = {
+                        "factor": factor_identifier,
+                        "code": factor_identifier,
+                        "avg_ic": 0.0,
+                        "avg_ir": 0.0,
+                        "avg_valid_ratio": 0.0,
+                        "passed": False,
+                        "sample_size": 0,
+                        "error": str(factor_error),
+                    }
+
+                details.append(detail)
+        finally:
+            db.close()
+
         return {
             "success": True,
             "data": {
                 "total": len(request.factors),
-                "selected": len(request.factors),
-                "factors": request.factors
+                "selected": len(selected_factors),
+                "factors": selected_factors,
+                "details": details,
+                "sample_stock_codes": sample_stock_codes,
+                "evaluation_period": {
+                    "start_date": settings.DEFAULT_START_DATE,
+                    "end_date": settings.DEFAULT_END_DATE,
+                }
             }
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/validate")
 async def validate_factor(request: dict):
-    """验证因子公式"""
+    """验证因子表达式"""
     try:
         code = request.get("code", "")
-        formula_type = request.get("formula_type", "expression")
+        formula_type = request.get("formula_type", "auto")
 
         if not code:
             return {
                 "success": False,
-                "message": "代码不能为空"
+                "message": "因子表达式不能为空"
             }
 
         # 字符检查：确保只包含合法字符
@@ -283,11 +420,13 @@ async def validate_factor(request: dict):
         if re.search(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', code):
             return {
                 "success": False,
-                "message": "代码包含非法控制字符"
+                "message": "因子表达式包含非法控制字符"
             }
 
+        resolved_type = normalize_formula_type(formula_type, code)
+
         # 调用真正的验证逻辑：执行代码来测试
-        is_valid, message = factor_service.validate_factor_code(code)
+        is_valid, message = factor_service.validate_factor_code(code, formula_type=resolved_type)
 
         if not is_valid:
             return {
@@ -299,10 +438,10 @@ async def validate_factor(request: dict):
             "success": True,
             "data": {
                 "code": code,
-                "formula_type": formula_type,
+                "formula_type": resolved_type,
                 "valid": True
             },
-            "message": "验证通过"
+            "message": message
         }
     except Exception as e:
         return {
@@ -355,7 +494,7 @@ async def copy_factor(factor_id: int):
             code=original_factor.get("code", ""),
             category=original_factor.get("category", ""),
             description=original_factor.get("description", ""),
-            formula_type=original_factor.get("formula_type", "expression")
+            formula_type=original_factor.get("formula_type", "auto")
         )
 
         return {

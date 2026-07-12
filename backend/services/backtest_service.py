@@ -24,6 +24,7 @@ from backend.strategies.base_strategy import BaseStrategy
 from backend.services.strategy_registry import strategy_registry
 from backend.services.strategy_comparison_service import strategy_comparison_service
 from backend.services.position_analysis_service import position_analysis_service
+from backend.services.portfolio_analysis_service import portfolio_analysis_service
 from backend.services.export_service import export_service
 
 
@@ -239,8 +240,10 @@ class BacktestService:
             weights: 因子权重列表，如果为None则根据method计算
             method: 权重分配方法
                 - "equal_weight": 等权重
-                - "ic_weight": IC加权（需要预先提供IC值）
-                - "risk_parity": 风险平价（简化版：按波动率倒数加权）
+                - "ic_weight": IC加权
+                - "risk_parity": 风险平价
+                - "max_sharpe": 最大夏普比率
+                - "min_variance": 最小方差
             percentile: 分位数阈值
             direction: 交易方向
 
@@ -264,20 +267,39 @@ class BacktestService:
 
         std_factor_names = [f"{fn}_std" for fn in factor_names]
 
+        df["next_return"] = df["close"].pct_change(1).shift(-1)
+
         # 2. 计算因子权重
         if weights is None:
             if method == "equal_weight":
                 weights = [1.0 / len(factor_names)] * len(factor_names)
-            elif method == "risk_parity":
-                # 简化版：按因子波动率的倒数加权
-                inv_vol = []
-                for fn in std_factor_names:
-                    vol = df[fn].std()
-                    inv_vol.append(1.0 / (vol + 1e-8))
-                total = sum(inv_vol)
-                weights = [v / total for v in inv_vol]
             else:
-                weights = [1.0 / len(factor_names)] * len(factor_names)
+                factor_return_frame = {}
+                for factor_name, std_factor_name in zip(factor_names, std_factor_names):
+                    aligned = pd.DataFrame(
+                        {
+                            "factor": df[std_factor_name],
+                            "return": df["next_return"],
+                        }
+                    ).replace([np.inf, -np.inf], np.nan).dropna()
+
+                    if aligned.empty:
+                        continue
+
+                    factor_return_frame[factor_name] = aligned["factor"] * aligned["return"]
+
+                factor_returns_df = pd.DataFrame(factor_return_frame).dropna(how="all")
+                if factor_returns_df.empty:
+                    raise ValueError("无法基于真实因子收益序列计算权重")
+
+                optimized = portfolio_analysis_service.optimize_weights(
+                    factor_returns=factor_returns_df,
+                    method=method,
+                )
+                if "error" in optimized:
+                    raise ValueError(optimized["error"])
+
+                weights = [optimized["weights"].get(name, 0.0) for name in factor_names]
 
         # 3. 计算组合得分
         df["composite_score"] = sum(
@@ -297,7 +319,6 @@ class BacktestService:
             signal_mask = df["score_rank"] <= percentile_threshold
 
         # 6. 计算收益
-        df["next_return"] = df["close"].pct_change(1).shift(-1)
         portfolio_returns = df["next_return"].copy()
         portfolio_returns[~signal_mask] = 0
 

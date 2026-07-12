@@ -1,11 +1,14 @@
 """
 策略回测API路由
 """
+from datetime import date, datetime
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 import sys
+import math
 import numpy as np
+import pandas as pd
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -16,6 +19,45 @@ from backend.repositories.factor_repository import FactorRepository
 from backend.core.database import get_db_session
 
 router = APIRouter()
+
+
+def _clean_json_value(value):
+    """递归清理对象，确保可被 JSON 序列化。"""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+
+    if isinstance(value, (datetime, date, pd.Timestamp)):
+        if pd.isna(value):
+            return None
+        return value.isoformat()
+
+    if isinstance(value, np.datetime64):
+        if np.isnat(value):
+            return None
+        return pd.Timestamp(value).isoformat()
+
+    if isinstance(value, dict):
+        return {str(key): _clean_json_value(item) for key, item in value.items()}
+
+    if isinstance(value, pd.DataFrame):
+        return _clean_json_value(value.to_dict("records"))
+
+    if isinstance(value, (pd.Series, pd.Index)):
+        return [_clean_json_value(item) for item in value.tolist()]
+
+    if isinstance(value, np.ndarray):
+        return [_clean_json_value(item) for item in value.tolist()]
+
+    if isinstance(value, (list, tuple, set)):
+        return [_clean_json_value(item) for item in value]
+
+    if isinstance(value, np.generic):
+        return _clean_json_value(value.item())
+
+    if isinstance(value, float):
+        return None if not math.isfinite(value) else value
+
+    return value
 
 
 # ========== 数据模型 ==========
@@ -67,7 +109,6 @@ async def run_single_backtest(request: SingleBacktestRequest):
         from backend.services.factor_service import factor_service
         from backend.repositories.factor_repository import FactorRepository
         from backend.core.database import get_db_session
-        import pandas as pd
 
         # 确定要使用的因子列表
         if request.strategy_type == "multi_factor":
@@ -110,7 +151,7 @@ async def run_single_backtest(request: SingleBacktestRequest):
                 for factor_name in factor_names_to_use:
                     factor_def = factor_defs[factor_name]
                     factor_values = factor_calculator.calculate(
-                        stock_data, factor_def.code
+                        stock_data, factor_def.code, getattr(factor_def, "formula_type", None)
                     )
                     stock_data[factor_name] = factor_values
 
@@ -160,15 +201,38 @@ async def run_single_backtest(request: SingleBacktestRequest):
                 )
         else:
             # 多因子回测
-            df = list(all_factor_data.values())[0].copy()
-            result = backtest_service.multi_factor_backtest(
-                df=df,
-                factor_names=factor_names_to_use,
-                method=request.weight_method,
-                percentile=request.percentile,
-                direction=request.direction,
-                shares_per_trade=request.shares_per_trade,
-            )
+            if is_single_stock:
+                df = list(all_factor_data.values())[0].copy()
+                result = backtest_service.multi_factor_backtest(
+                    df=df,
+                    factor_names=factor_names_to_use,
+                    method=request.weight_method,
+                    percentile=request.percentile,
+                    direction=request.direction,
+                    shares_per_trade=request.shares_per_trade,
+                )
+            else:
+                merged_list = []
+                for code, data in all_factor_data.items():
+                    prepared_data = backtest_service.prepare_multi_factor_data(
+                        df=data.copy(),
+                        factor_names=factor_names_to_use,
+                        method=request.weight_method,
+                    )
+                    prepared_data["stock_code"] = code
+                    if "date" not in prepared_data.columns:
+                        prepared_data = prepared_data.reset_index()
+                    merged_list.append(prepared_data)
+
+                df = pd.concat(merged_list, ignore_index=True)
+                top_percentile = (100 - request.percentile) / 100.0
+                primary_factor_name = "composite_score"
+                result = backtest_service.cross_sectional_backtest(
+                    df=df,
+                    factor_name=primary_factor_name,
+                    top_percentile=top_percentile,
+                    direction=request.direction,
+                )
 
         # 提取指标
         metrics = {k: v for k, v in result.items() if k in [
@@ -177,43 +241,7 @@ async def run_single_backtest(request: SingleBacktestRequest):
             "var_95", "cvar_95"
         ]}
 
-        # 转换 pandas Series 为列表，以便 JSON 序列化
-        result_serializable = {}
-        for k, v in result.items():
-            if hasattr(v, 'tolist'):  # pandas Series or numpy array
-                result_serializable[k] = v.tolist()
-            elif k == "trades" and v is not None:
-                # 转换 DataFrame 为字典列表
-                result_serializable[k] = v.to_dict('records')
-            else:
-                result_serializable[k] = v
-
-        # 清理结果中的NaN和inf值，确保JSON可序列化
-        def clean_value(v):
-            """清理值：处理NaN、Inf和超大数值"""
-            if isinstance(v, float):
-                if np.isnan(v) or np.isinf(v):
-                    return None  # 使用None而不是0.0，更明确表示缺失值
-                # 检查是否超出JSON可表示的范围
-                if abs(v) > 1e308:  # JSON float最大值约为1.8e308
-                    return None
-            elif isinstance(v, (np.floating, np.float32, np.float64)):
-                # 处理numpy float类型
-                if np.isnan(v) or np.isinf(v):
-                    return None
-                if abs(v) > 1e308:
-                    return None
-                return float(v)
-            return v
-
-        def clean_dict(d):
-            """递归清理字典、列表中的值"""
-            if isinstance(d, dict):
-                return {k: clean_dict(v) for k, v in d.items()}
-            elif isinstance(d, list):
-                return [clean_value(v) for v in d]
-            else:
-                return clean_value(d)
+        result_serializable = _clean_json_value(result)
 
         # 添加详细的图表数据
         chart_data = {}
@@ -264,15 +292,31 @@ async def run_single_backtest(request: SingleBacktestRequest):
             }
 
             # 买卖信号 - 两种类型
-            factor_rank = df[primary_factor_name].rolling(252, min_periods=1).rank(pct=True)
-            percentile_threshold = request.percentile / 100.0
+            if is_single_stock:
+                factor_rank = df[primary_factor_name].rolling(252, min_periods=1).rank(pct=True)
+                percentile_threshold = request.percentile / 100.0
 
-            if request.direction == "long":
-                entries = factor_rank >= percentile_threshold
-                exits = factor_rank < percentile_threshold
+                if request.direction == "long":
+                    raw_entries = factor_rank >= percentile_threshold
+                    raw_exits = factor_rank < percentile_threshold
+                else:
+                    raw_entries = factor_rank <= percentile_threshold
+                    raw_exits = factor_rank > percentile_threshold
+
+                entries = raw_entries.shift(1, fill_value=False)
+                exits = raw_exits.shift(1, fill_value=False)
             else:
-                entries = factor_rank <= percentile_threshold
-                exits = factor_rank > percentile_threshold
+                selection_by_date = result.get("selection_by_date", {})
+                entry_flags = []
+                exit_flags = []
+                previous_selected = False
+                for date in df.index.strftime('%Y-%m-%d'):
+                    current_selected = stock_code in selection_by_date.get(date, [])
+                    entry_flags.append(current_selected)
+                    exit_flags.append(previous_selected and not current_selected)
+                    previous_selected = current_selected
+                entries = pd.Series(entry_flags, index=df.index).astype(bool)
+                exits = pd.Series(exit_flags, index=df.index).astype(bool)
 
             # 1. 策略信号（所有满足条件的信号，不考虑持仓状态）
             strategy_buy_dates = df.index[entries].strftime('%Y-%m-%d').tolist()
@@ -343,19 +387,13 @@ async def run_single_backtest(request: SingleBacktestRequest):
                 }
             }
 
-            # 净值曲线 - 使用result中的equity_curve，或者基于信号生成模拟的
-            if "equity_curve" in result_serializable and is_single_stock:
+            # 净值曲线
+            if "equity_curve" in result_serializable:
                 # 单股票模式使用回测结果的净值曲线
                 equity_dates = result["equity_curve"].index.strftime('%Y-%m-%d').tolist()
                 stock_chart_data["equity"] = {
                     "dates": equity_dates,
                     "values": result_serializable["equity_curve"]
-                }
-            else:
-                # 多股票模式或没有equity_curve时，生成基于收盘价的基准曲线
-                stock_chart_data["equity"] = {
-                    "dates": df.index.strftime('%Y-%m-%d').tolist(),
-                    "values": (df["close"] / df["close"].iloc[0] * request.initial_capital).tolist()
                 }
 
             # 保存当前股票的图表数据
@@ -367,9 +405,9 @@ async def run_single_backtest(request: SingleBacktestRequest):
             chart_data = chart_data[first_stock]
 
         # 清洗数据以确保JSON序列化有效
-        cleaned_metrics = clean_dict(metrics)
-        cleaned_result = clean_dict(result_serializable)
-        cleaned_chart_data = clean_dict(chart_data)
+        cleaned_metrics = _clean_json_value(metrics)
+        cleaned_result = _clean_json_value(result_serializable)
+        cleaned_chart_data = _clean_json_value(chart_data)
 
         return {
             "success": True,
@@ -391,8 +429,6 @@ async def run_strategy_comparison(request: ComparisonRequest):
     try:
         from backend.services.data_service import data_service
         from backend.services.factor_service import factor_service
-        import pandas as pd
-        import numpy as np
 
         # 获取数据
         all_data = {}
@@ -408,23 +444,6 @@ async def run_strategy_comparison(request: ComparisonRequest):
         if not all_data:
             raise HTTPException(status_code=404, detail="未获取到任何数据")
 
-        # 合并数据
-        data_frames = []
-        for stock_code, data in all_data.items():
-            df_copy = data.copy()
-            df_copy['stock_code'] = stock_code
-            df_copy = df_copy.reset_index()
-            data_frames.append(df_copy)
-
-        merged_data = pd.concat(data_frames, ignore_index=True)
-
-        # 确保有return列
-        if 'return' not in merged_data.columns and 'close' in merged_data.columns:
-            merged_data = merged_data.sort_values(['stock_code', 'date'])
-            merged_data['return'] = merged_data.groupby('stock_code')['close'].pct_change().shift(-1)
-
-        merged_data = merged_data.sort_values(["date", "stock_code"])
-
         # 计算每个策略的收益
         results = {}
         for config in request.strategies:
@@ -439,95 +458,76 @@ async def run_strategy_comparison(request: ComparisonRequest):
             if not factor_def:
                 continue
 
-            # 计算因子值（使用因子代码）
-            factor_values = factor_service.calculator.calculate(
-                merged_data, factor_def.code
-            )
+            strategy_frames = []
+            for stock_code, stock_data in all_data.items():
+                stock_df = stock_data.copy()
+                factor_values = factor_service.calculator.calculate(
+                    stock_df, factor_def.code, getattr(factor_def, "formula_type", None)
+                )
+                if factor_values is None:
+                    continue
 
-            if factor_values is not None:
-                # 创建因子DataFrame
-                factor_df = merged_data.copy()
-                factor_df["factor_value"] = factor_values
+                stock_df["factor_value"] = factor_values
+                stock_df["return"] = stock_df["close"].pct_change().shift(-1)
+                stock_df["stock_code"] = stock_code
+                strategy_frames.append(stock_df.rename_axis("date").reset_index())
 
-                # 按日期分组，选择top N股票
-                selected_returns = []
-                for date, group in factor_df.groupby("date"):
-                    # 计算选择的股票数量 - 确保至少选择1只
-                    top_pct = config.get("top_pct", 20) / 100
-                    n_select = max(1, int(len(group) * top_pct))
+            if not strategy_frames:
+                continue
 
-                    if config.get("direction", "long") == "long":
-                        top_stocks = group.nlargest(n_select, "factor_value")
-                    else:
-                        top_stocks = group.nsmallest(n_select, "factor_value")
+            factor_df = pd.concat(strategy_frames, ignore_index=True)
+            factor_df = factor_df.sort_values(["date", "stock_code"])
 
-                    # 计算下期收益
-                    if "stock_code" in merged_data.columns:
-                        next_returns = merged_data[
-                            (merged_data["date"] > date) &
-                            (merged_data["stock_code"].isin(top_stocks["stock_code"]))
-                        ].groupby("stock_code")["return"].first()
+            selected_returns = []
+            selected_dates = []
+            for date, group in factor_df.groupby("date"):
+                group = group.dropna(subset=["factor_value", "return"])
+                if group.empty:
+                    continue
 
-                        if len(next_returns) > 0:
-                            avg_return = next_returns.mean()
-                            selected_returns.append(avg_return)
+                top_pct = config.get("top_pct", 20) / 100
+                n_select = max(1, int(len(group) * top_pct))
 
-                # 构建策略收益序列
-                if selected_returns:
-                    returns_series = pd.Series(selected_returns)
-                    total_return = float((1 + returns_series).prod() - 1)
-                    n_days = len(returns_series)
+                if config.get("direction", "long") == "long":
+                    top_stocks = group.nlargest(n_select, "factor_value")
+                else:
+                    top_stocks = group.nsmallest(n_select, "factor_value")
 
-                    # 使用复利计算年化收益率，与单策略回测保持一致
-                    if n_days > 0:
-                        annual_return = float((1 + total_return) ** (252 / n_days) - 1)
-                    else:
-                        annual_return = 0.0
+                if len(top_stocks) == 0:
+                    continue
 
-                    results[strategy_name] = {
-                        "returns": returns_series.tolist(),
-                        "total_return": total_return,
-                        "annual_return": annual_return,
-                        "volatility": float(returns_series.std() * np.sqrt(252)),
-                    }
+                avg_return = top_stocks["return"].mean()
+                if pd.notna(avg_return):
+                    selected_returns.append(avg_return)
+                    selected_dates.append(date)
 
-                    # 计算夏普比率
-                    if results[strategy_name]["volatility"] > 0:
-                        results[strategy_name]["sharpe_ratio"] = (
-                            results[strategy_name]["annual_return"] /
-                            results[strategy_name]["volatility"]
-                        )
-                    else:
-                        results[strategy_name]["sharpe_ratio"] = 0.0
+            if selected_returns:
+                returns_series = pd.Series(selected_returns, index=selected_dates)
+                total_return = float((1 + returns_series).prod() - 1)
+                n_days = len(returns_series)
 
-        # 清理结果中的NaN和inf值，确保JSON可序列化
-        def clean_value(v):
-            """清理值：处理NaN、Inf和超大数值"""
-            if isinstance(v, float):
-                if np.isnan(v) or np.isinf(v):
-                    return None  # 使用None而不是0.0，更明确表示缺失值
-                # 检查是否超出JSON可表示的范围
-                if abs(v) > 1e308:  # JSON float最大值约为1.8e308
-                    return None
-            elif isinstance(v, (np.floating, np.float32, np.float64)):
-                # 处理numpy float类型
-                if np.isnan(v) or np.isinf(v):
-                    return None
-                if abs(v) > 1e308:
-                    return None
-                return float(v)
-            return v
+                if n_days > 0:
+                    annual_return = float((1 + total_return) ** (252 / n_days) - 1)
+                else:
+                    annual_return = 0.0
 
-        def clean_dict(d):
-            """递归清理字典、列表中的值"""
-            if isinstance(d, dict):
-                return {k: clean_dict(v) for k, v in d.items()}
-            elif isinstance(d, list):
-                return [clean_value(v) for v in d]
-            else:
-                return clean_value(d)
+                results[strategy_name] = {
+                    "dates": [pd.Timestamp(dt).strftime("%Y-%m-%d") for dt in returns_series.index],
+                    "returns": returns_series.tolist(),
+                    "total_return": total_return,
+                    "annual_return": annual_return,
+                    "volatility": float(returns_series.std() * np.sqrt(252)),
+                }
 
-        results_clean = clean_dict(results)
+                if results[strategy_name]["volatility"] > 0:
+                    results[strategy_name]["sharpe_ratio"] = (
+                        results[strategy_name]["annual_return"] /
+                        results[strategy_name]["volatility"]
+                    )
+                else:
+                    results[strategy_name]["sharpe_ratio"] = 0.0
+
+        results_clean = _clean_json_value(results)
 
         return {
             "success": True,

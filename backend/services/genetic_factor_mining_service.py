@@ -6,6 +6,7 @@ from typing import List, Dict, Callable, Optional
 import pandas as pd
 import numpy as np
 import random
+import re
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ except ImportError:
 
 from backend.services.factor_generator_service import factor_generator_service
 from backend.services.factor_validation_service import factor_validation_service
+from backend.formula_engine.code_normalizer import normalize_formula_code
 
 
 class GeneticFactorMiningService:
@@ -66,6 +68,8 @@ class GeneticFactorMiningService:
         # 预计算基础因子值（存储为字典，方便表达式计算）
         self.base_factor_values = {}
         self._precompute_base_factors()
+        if not self.base_factor_values:
+            raise ValueError("所选基础因子均无法转换为可组合的可执行表达式")
 
         # 初始化遗传算法
         self._setup_genetic_algorithm()
@@ -81,15 +85,29 @@ class GeneticFactorMiningService:
 
         for i, factor_code in enumerate(self.base_factor_codes):
             try:
+                composable_code = self._build_composable_factor_code(factor_code)
+                if not composable_code:
+                    logger.warning(
+                        "  [%s/%s] %s: 跳过，不支持组合为候选表达式",
+                        i + 1,
+                        len(self.base_factor_codes),
+                        factor_code,
+                    )
+                    continue
+
                 factor_values = self.factor_calculator.calculate(self.data, factor_code)
                 if factor_values is not None and len(factor_values.dropna()) > 0:
                     # 使用唯一的变量名（避免代码中的特殊字符）
                     var_name = f"factor_{i}"
                     self.base_factor_values[var_name] = {
-                        "code": factor_code,
+                        "code": composable_code,
+                        "source_code": factor_code,
                         "values": factor_values
                     }
-                    logger.info(f"  [{i+1}/{len(self.base_factor_codes)}] {factor_code}: {len(factor_values.dropna())} 个有效值")
+                    logger.info(
+                        f"  [{i+1}/{len(self.base_factor_codes)}] {factor_code}: "
+                        f"{len(factor_values.dropna())} 个有效值，可组合表达式={composable_code}"
+                    )
                 else:
                     logger.warning(f"  [{i+1}/{len(self.base_factor_codes)}] {factor_code}: 计算失败或无有效值")
             except Exception as e:
@@ -100,10 +118,12 @@ class GeneticFactorMiningService:
     def _setup_genetic_algorithm(self):
         """设置遗传算法"""
         # 定义适应度函数（最大化IC绝对值和IR）
-        creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+        if not hasattr(creator, "FitnessMax"):
+            creator.create("FitnessMax", base.Fitness, weights=(1.0,))
 
         # 定义个体（因子表达式）
-        creator.create("Individual", list, fitness=creator.FitnessMax)
+        if not hasattr(creator, "Individual"):
+            creator.create("Individual", list, fitness=creator.FitnessMax)
 
         # 创建工具箱
         self.toolbox = base.Toolbox()
@@ -479,19 +499,19 @@ class GeneticFactorMiningService:
             # 添加/移除一元函数
             if random.random() < 0.5:
                 # 添加函数
-                var = random.choice([v for v in var_names if v in expr])
-                func = random.choice(["np.log", "np.sqrt", "np.abs"])
-                # 只对第一次出现的变量添加函数
-                expr = expr.replace(var, f"{func}({var})", 1)
+                matched_vars = [v for v in var_names if v in expr]
+                if matched_vars:
+                    var = random.choice(matched_vars)
+                    func = random.choice(["np.log", "np.sqrt", "np.abs"])
+                    expr = self._replace_variable(expr, var, f"{func}({var})", 1)
             else:
-                # 简化：如果表达式以函数开头，尝试移除函数
+                # 如果表达式整体被一元函数包裹，则移除外层函数
                 for func in ["np.log", "np.sqrt", "np.abs"]:
                     if expr.startswith(f"{func}(") and expr.endswith(")"):
                         # 提取内部表达式
                         inner = expr[len(func)+1:-1]
-                        if inner in var_names:
-                            expr = inner
-                            break
+                        expr = inner
+                        break
 
         # 创建新的Individual对象并返回
         mutated = creator.Individual()
@@ -500,21 +520,28 @@ class GeneticFactorMiningService:
 
     def _convert_expression_to_code(self, expr: str) -> str:
         """
-        将占位符表达式转换为实际因子代码
+        将内部变量表达式转换为实际因子代码
 
         Args:
-            expr: 包含占位符的表达式（如 "(factor_0 * 1.5)"）
+            expr: 包含内部变量名的表达式（如 "(factor_0 * 1.5)"）
 
         Returns:
             实际因子代码表达式（如 "(RSI(close, 14) * 1.5)"）
         """
         converted_expr = expr
 
-        # 将所有占位符变量名替换为实际因子代码
-        for var_name, factor_info in self.base_factor_values.items():
+        # 将内部变量名替换为实际因子代码
+        for var_name, factor_info in sorted(
+            self.base_factor_values.items(),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        ):
             actual_code = factor_info["code"]
-            # 替换占位符
-            converted_expr = converted_expr.replace(var_name, f"({actual_code})")
+            converted_expr = self._replace_variable(
+                converted_expr,
+                var_name,
+                f"({actual_code})",
+            )
 
         return converted_expr
 
@@ -598,22 +625,22 @@ class GeneticFactorMiningService:
         # 提取最优因子
         best_factors = []
         for i, individual in enumerate(halloffame):
-            # 获取原始表达式（包含占位符）
-            placeholder_expr = individual[0]
+            # 获取内部表达式
+            internal_expr = individual[0]
 
             # 转换为实际因子代码
-            actual_expr = self._convert_expression_to_code(placeholder_expr)
+            actual_expr = self._convert_expression_to_code(internal_expr)
 
             factor_info = {
                 "rank": i + 1,
-                "expression": actual_expr,  # 使用实际代码而不是占位符
-                "placeholder_expression": placeholder_expr,  # 保留占位符表达式用于调试
+                "expression": actual_expr,
+                "internal_expression": internal_expr,
                 "fitness": float(individual.fitness.values[0]),
             }
 
             # 重新计算详细指标
             try:
-                factor_values = self._compute_factor_expression(placeholder_expr)
+                factor_values = self._compute_factor_expression(internal_expr)
                 if factor_values is not None and self.return_values is not None:
                     validation = factor_validation_service.validate_factor(
                         factor_values=factor_values,
@@ -683,11 +710,52 @@ class GeneticFactorMiningService:
         return {
             "success": True,
             "original_expression": initial_expression,
-            "evolved_expression": best[0],
+            "evolved_expression": self._convert_expression_to_code(best[0]),
+            "internal_evolved_expression": best[0],
             "original_fitness": self._evaluate_factor([initial_expression])[0],
             "evolved_fitness": float(best.fitness.values[0]),
             "improvement": float(best.fitness.values[0]) - self._evaluate_factor([initial_expression])[0],
         }
+
+    def _replace_variable(
+        self,
+        expression: str,
+        variable_name: str,
+        replacement: str,
+        count: int = 0,
+    ) -> str:
+        """按变量边界安全替换内部表达式变量。"""
+        pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(variable_name)}(?![A-Za-z0-9_])")
+        return pattern.sub(replacement, expression, count=count)
+
+    def _build_composable_factor_code(self, factor_code: str) -> Optional[str]:
+        """将基础因子代码转换为可继续组合的单表达式。"""
+        stripped = (factor_code or "").strip()
+        if not stripped:
+            return None
+
+        normalized = normalize_formula_code(
+            stripped,
+            self.factor_calculator.infer_formula_type(stripped)
+            if self.factor_calculator is not None
+            else None,
+        )
+        resolved_type = (
+            self.factor_calculator.infer_formula_type(normalized)
+            if self.factor_calculator is not None
+            else None
+        )
+
+        if resolved_type == "python":
+            if normalized.startswith("def calculate_factor"):
+                logger.warning("Python 函数型因子暂不支持作为可保存候选因子的基础表达式: %s", stripped)
+                return None
+            return normalized
+
+        if resolved_type != "mylanguage":
+            return None
+
+        return normalized
 
 
 # 全局遗传算法挖掘服务实例（需要初始化参数）

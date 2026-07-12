@@ -22,6 +22,7 @@ A full-stack quantitative investment research system integrating factor manageme
 | 🎯 **Complete Factor Lifecycle Management** | Full support from factor creation, validation, analysis to deployment |
 | 🧪 **Scientific Factor Evaluation System** | Professional indicators including IC/IR analysis, monotonicity test, turnover analysis |
 | 🧬 **Intelligent Factor Mining** | Genetic algorithm-based automated factor mining to discover alpha signals |
+| 🤖 **AI Research Assistant** | Supports natural-language factor generation, AI interpretation of analysis results, and report drafting |
 | 📊 **Professional Backtesting Engine** | Support for multi-factor combination, strategy comparison, and performance attribution analysis |
 
 ---
@@ -71,6 +72,13 @@ A full-stack quantitative investment research system integrating factor manageme
 - ✅ **Visualization Charts** - Equity curves, drawdowns, factor performance charts, etc.
 
 ![1773500440529](image/README_ZH/1773500440529.png)
+
+### 6. AI Capabilities
+- ✅ **AI Factor Generation** - Turn research ideas written in plain language into candidate factors for further validation
+- ✅ **AI-assisted Formula Refinement** - Help improve factor expressions into clearer, library-ready definitions
+- ✅ **AI Interpretation of Factor Analysis** - Produce structured research commentary based on factor definitions, analysis results, and chart context
+- ✅ **AI Support for Use-case and Risk Review** - Help researchers quickly understand market intuition, limitations, and potential risks behind a factor
+- ✅ **AI Report Export** - Organize AI interpretation output into shareable Markdown research notes
 
 ---
 
