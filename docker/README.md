@@ -70,5 +70,6 @@ TZ=Asia/Shanghai
 ## Notes
 
 1. **Data Persistence**: `data/` directory is mounted as a volume
-2. **TA-Lib**: Pre-installed in the Dockerfile
-3. **Production**: Consider restricting CORS allowed origins
+2. **Safe Image Content**: Docker image only carries the sample database and required application files; local model configuration, runtime cache, logs, and database backups are not baked into the image
+3. **TA-Lib**: Pre-installed in the Dockerfile
+4. **Production**: Consider restricting CORS allowed origins

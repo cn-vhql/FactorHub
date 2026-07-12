@@ -3,7 +3,7 @@ name = "factor-flow"
 version = "0.1.0"
 description = "因子分析平台 - 基于Web前端的量化因子分析系统"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "akshare>=1.12.0",
     "pandas>=2.0.0",

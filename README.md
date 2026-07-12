@@ -194,6 +194,38 @@ pnpm dev
 # Frontend available at http://localhost:5173
 ```
 
+### Docker Deployment
+
+If you prefer to deploy the full application with Docker, use the built-in Docker configuration:
+
+```bash
+cd docker
+docker compose build
+docker compose up -d
+```
+
+After startup, access:
+
+| Service | URL |
+|---------|-----|
+| Frontend | http://localhost:8000 |
+| API Docs | http://localhost:8000/docs |
+
+Common commands:
+
+```bash
+# View logs
+docker compose logs -f
+
+# Stop services
+docker compose down
+```
+
+Notes:
+- The Docker image includes the application code and frontend build artifacts required for runtime
+- The `data/` directory is mounted for persistent storage of factor data and runtime outputs
+- Local AI model configuration, cache files, test logs, and database backups are not baked into the image
+
 ---
 
 ## License

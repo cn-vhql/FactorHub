@@ -539,6 +539,39 @@ pnpm dev
 | API服务  | http://localhost:8000      | FastAPI后端        |
 | API文档  | http://localhost:8000/docs | Swagger文档        |
 
+### Docker 部署
+
+如果希望使用 Docker 直接部署完整应用，可以使用项目内置的 Docker 配置：
+
+```bash
+cd docker
+docker compose build
+docker compose up -d
+```
+
+启动完成后，访问：
+
+| 服务     | 地址                       | 说明               |
+| -------- | -------------------------- | ------------------ |
+| 前端应用 | http://localhost:8000      | 前后端一体化访问   |
+| API文档  | http://localhost:8000/docs | Swagger文档        |
+
+常用命令：
+
+```bash
+# 查看日志
+docker compose logs -f
+
+# 停止服务
+docker compose down
+```
+
+说明：
+
+- Docker 镜像默认包含应用运行所需代码和前端构建产物
+- `data/` 目录会作为持久化数据目录挂载，便于保留因子库和运行结果
+- 本地 AI 模型配置、缓存、测试日志和数据库备份不会被打进镜像
+
 ---
 
 ## 数据处理计算逻辑

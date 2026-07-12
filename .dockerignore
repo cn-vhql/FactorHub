@@ -40,6 +40,12 @@ htmlcov/
 *.log
 *.db
 logs/
+data/cache/
+data/test-logs/
+data/db/backups/
+data/ai_model_config.json
+data/db/factorflow.db
+!data/db/factorflow.sample.db
 
 # 本地配置
 .env

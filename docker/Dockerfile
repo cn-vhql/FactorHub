@@ -17,7 +17,7 @@ RUN pnpm install --frozen-lockfile || pnpm install
 COPY frontend/react-antd/ ./
 
 # Build frontend
-RUN pnpm vite build
+RUN pnpm build
 
 # ============================================
 # Stage 2: Backend Runtime
@@ -70,17 +70,18 @@ WORKDIR /app
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Copy dependency files
-COPY pyproject.toml uv.lock ./ 
+# Copy backend application sources
+COPY README.md pyproject.toml uv.lock ./
+COPY backend/ ./backend/
+COPY config/ ./config/
+COPY start_api.py ./
 
 # Install Python dependencies
 RUN uv pip install --system --no-cache .
 
-# Copy backend code
-COPY backend/ ./backend/
-COPY config/ ./config/
-COPY data/ ./data/
-COPY start_api.py ./
+# Prepare runtime data directories and seed only the safe sample database
+RUN mkdir -p /app/data/db /app/data/cache /app/data/reports
+COPY data/db/factorflow.sample.db ./data/db/factorflow.sample.db
 
 # Copy frontend build artifacts (for FastAPI static file serving)
 COPY --from=frontend-builder /app/frontend/dist ./frontend/react-antd/dist
